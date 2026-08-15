@@ -201,13 +201,28 @@ func frameLayer(broker joaju.Broker, subscribe joaju.SubscriptionPolicy, cfg con
 		// client pinging at the deadline pings a socket already hung up on, and
 		// the round trip it needs has not even been spent yet.
 		//
-		// Zero PongTimeout means ServerConfig fills its own default, and this
-		// stays zero: the frame then leaves activity_timeout out and the client
-		// falls back to its own, which is the honest answer when this process
-		// does not know the number either.
-		ActivityTimeout: cfg.PongTimeout / 2,
+		// A zero PongTimeout is ServerConfig filling its own default, so the
+		// number is known and the same one is used here. Leaving the field out
+		// instead would send the client to its own fallback, which the Pusher
+		// clients put at 120 seconds -- four times this server's deadline, so
+		// every idle socket would be hung up on before the client thought to
+		// ping.
+		ActivityTimeout: activityTimeout(cfg.PongTimeout),
 		ClientEvents:    cfg.ClientEvents,
 	})
+}
+
+// activityTimeout is how long a client may stay silent before it should ping.
+//
+// Half the read deadline, so that a client obeying the instruction is heard well
+// before the deadline it would otherwise reach with the round trip still
+// unspent.
+func activityTimeout(pong time.Duration) time.Duration {
+	if pong <= 0 {
+		pong = joaju.DefaultPongTimeout
+	}
+
+	return pong / 2
 }
 
 // shutdown stops the process in the order that leaves nothing half-served.
