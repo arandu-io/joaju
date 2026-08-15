@@ -4,7 +4,7 @@
 
 **Do not open a public issue.** Use one of:
 
-- [GitHub Security Advisory](https://github.com/arandu-io/framework/security/advisories/new)
+- [GitHub Security Advisory](https://github.com/arandu-io/joaju/security/advisories/new)
 
 That is the only channel, and it is deliberate. An `security@` address was
 published here before the domain had a mail exchanger, so a report sent to it
