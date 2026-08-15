@@ -100,10 +100,12 @@
 // Every one of the seven that reads or writes channel state needs a Grant, and
 // [Broker] is why: there is no method on it that reaches a channel without one.
 //
-// # The fork
+// # The transport
 //
-// Subpackage websocket is a fork of gorilla/websocket, BSD-2-Clause, carried
-// under THIRD_PARTY.md (ADR 0052). It is the only third-party code in the
-// repository, and forking it rather than depending on it is what keeps the
-// dependency graph at one entry.
+// Subpackage ws is this project's own implementation of RFC 6455, and it is why
+// the dependency graph has one entry in it. It is not a fork and it borrows no
+// code: the surface this server actually uses is ten symbols, so writing them
+// costs less than carrying a library's client stack, proxy support and
+// compression -- and less than tracking somebody else's security advisories
+// forever (ADR 0052).
 package joaju

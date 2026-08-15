@@ -16,7 +16,7 @@ import (
 
 	"github.com/arandu-io/hesape/auth"
 	"github.com/arandu-io/joaju"
-	"github.com/arandu-io/joaju/websocket"
+	"github.com/arandu-io/joaju/ws"
 )
 
 // The application this file's server is. One server is one application
@@ -348,13 +348,13 @@ func (f *serverFixture) post(t *testing.T, path, body string) (int, []byte) {
 
 // dial opens the socket with the given Origin header. An empty origin sends no
 // header at all, which is what a non-browser client does.
-func (f *serverFixture) dial(t *testing.T, origin string) (*websocket.Conn, *http.Response, error) {
+func (f *serverFixture) dial(t *testing.T, origin string) (*ws.Conn, *http.Response, error) {
 	t.Helper()
 
 	return f.dialKey(t, origin, serverAppKey)
 }
 
-func (f *serverFixture) dialKey(t *testing.T, origin, key string) (*websocket.Conn, *http.Response, error) {
+func (f *serverFixture) dialKey(t *testing.T, origin, key string) (*ws.Conn, *http.Response, error) {
 	t.Helper()
 
 	header := http.Header{}
@@ -362,7 +362,7 @@ func (f *serverFixture) dialKey(t *testing.T, origin, key string) (*websocket.Co
 		header.Set("Origin", origin)
 	}
 
-	dialer := *websocket.DefaultDialer
+	dialer := *ws.DefaultDialer
 	dialer.HandshakeTimeout = 5 * time.Second
 
 	return dialer.Dial(f.socketURL(key), header)
@@ -460,7 +460,7 @@ func TestServerReadsWhatTheClientSendsIntoTheProtocol(t *testing.T) {
 	}
 	defer func() { _ = conn.Close() }()
 
-	if err := conn.WriteMessage(websocket.TextMessage, []byte(`{"event":"pusher:ping"}`)); err != nil {
+	if err := conn.WriteMessage(ws.TextMessage, []byte(`{"event":"pusher:ping"}`)); err != nil {
 		t.Fatalf("writing a frame = %v", err)
 	}
 

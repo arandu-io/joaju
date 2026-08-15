@@ -64,7 +64,7 @@ type InstanceID string
 // is a separate module, because the driver beneath it is a third-party
 // dependency and Go has no optional dependency (ADR 0048). Importing it would
 // put that driver in this repository's go.mod, and a graph with one entry in it
-// is what forking gorilla/websocket bought (ADR 0052). Stating the contract and
+// is what writing the ws subpackage bought (ADR 0052). Stating the contract and
 // letting the application pass its connection in costs nothing and keeps the
 // graph.
 //

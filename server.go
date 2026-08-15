@@ -15,7 +15,7 @@ import (
 
 	"github.com/arandu-io/hesape/auth"
 	"github.com/arandu-io/hesape/broadcasting"
-	"github.com/arandu-io/joaju/websocket"
+	"github.com/arandu-io/joaju/ws"
 )
 
 // ErrSocketClosed is what [Sink.Send] answers once the socket is gone.
@@ -204,7 +204,7 @@ type Server struct {
 	protocol  Protocol
 	log       *slog.Logger
 
-	upgrader websocket.Upgrader
+	upgrader ws.Upgrader
 	mux      *http.ServeMux
 
 	maxMessageSize int64
@@ -306,7 +306,7 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	// narrow, never disagree. Cross-origin sockets are not available in the
 	// first version, and when they are it will be this one function that
 	// changes, not a list in a config file (ADR 0052, RULE 9).
-	s.upgrader = websocket.Upgrader{
+	s.upgrader = ws.Upgrader{
 		ReadBufferSize:  1024,
 		WriteBufferSize: 1024,
 	}
@@ -479,7 +479,7 @@ func (s *Server) handleSocket(w http.ResponseWriter, r *http.Request) {
 // is the writer started by [Server.newSink], and it is the only thing that ever
 // writes to this socket. Two writers on one Conn is a corrupted frame, which is
 // why [Sink.Send] is a queue and not a write.
-func (s *Server) read(r *http.Request, conn *Connection, socket *websocket.Conn) {
+func (s *Server) read(r *http.Request, conn *Connection, socket *ws.Conn) {
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 
@@ -517,7 +517,7 @@ func (s *Server) read(r *http.Request, conn *Connection, socket *websocket.Conn)
 	for {
 		_, message, err := socket.ReadMessage()
 		if err != nil {
-			if websocket.IsUnexpectedCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
+			if ws.IsUnexpectedClose(err, ws.CloseNormalClosure, ws.CloseGoingAway) {
 				s.log.InfoContext(ctx, "joaju: the socket ended",
 					slog.String("socket", string(conn.ID())), slog.Any("error", err))
 			}
@@ -983,7 +983,7 @@ func newSocketID() (SocketID, error) {
 // many callers as it has subscribers. Every one of them queues; one goroutine
 // writes.
 type sink struct {
-	conn         *websocket.Conn
+	conn         *ws.Conn
 	out          chan []byte
 	done         chan struct{}
 	once         sync.Once
@@ -992,7 +992,7 @@ type sink struct {
 }
 
 // newSink wraps the socket and starts its writer.
-func (s *Server) newSink(conn *websocket.Conn) *sink {
+func (s *Server) newSink(conn *ws.Conn) *sink {
 	k := &sink{
 		conn:         conn,
 		out:          make(chan []byte, s.outboundQueue),
@@ -1058,13 +1058,13 @@ func (k *sink) write() {
 		select {
 		case message := <-k.out:
 			_ = k.conn.SetWriteDeadline(time.Now().Add(k.writeTimeout))
-			if err := k.conn.WriteMessage(websocket.TextMessage, message); err != nil {
+			if err := k.conn.WriteMessage(ws.TextMessage, message); err != nil {
 				k.close()
 				return
 			}
 		case <-ticker.C:
 			_ = k.conn.SetWriteDeadline(time.Now().Add(k.writeTimeout))
-			if err := k.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+			if err := k.conn.WriteMessage(ws.PingMessage, nil); err != nil {
 				k.close()
 				return
 			}
@@ -1073,8 +1073,8 @@ func (k *sink) write() {
 			// find out from a reset. Whether it arrives is not worth waiting
 			// on: the socket is closed either way by the deferred Close.
 			_ = k.conn.SetWriteDeadline(time.Now().Add(k.writeTimeout))
-			_ = k.conn.WriteMessage(websocket.CloseMessage,
-				websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
+			_ = k.conn.WriteMessage(ws.CloseMessage,
+				ws.FormatClose(ws.CloseNormalClosure, ""))
 			return
 		}
 	}

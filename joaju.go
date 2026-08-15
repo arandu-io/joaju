@@ -329,9 +329,9 @@ func (n ChannelName) Type() ChannelType {
 
 // Sink is the write half of a socket: where a [Connection]'s bytes go.
 //
-// It is an interface so that this package declares no transport. The fork in
-// joaju/websocket implements it over a real socket, and a test implements it
-// over a slice.
+// It is an interface so that this package declares no transport. The [ws]
+// subpackage implements it over a real socket, and a test implements it over a
+// slice.
 //
 // It is named for what it is in Go terms rather than after Reverb's names for
 // the same two operations, which are methods on the Connection class itself --
