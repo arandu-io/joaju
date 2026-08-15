@@ -1285,6 +1285,21 @@ func (b relayedBroker) Remove(ctx context.Context, g auth.Grant, name ChannelNam
 		return err
 	}
 
+	// Remove is a request and not a promise: a Broker may keep a channel that
+	// filled again between the caller deciding it was empty and this call
+	// arriving, and [NewMemoryBroker] does exactly that. Leaving the topic
+	// anyway would stop this instance receiving broadcasts for a channel that
+	// still has subscribers on it -- messages lost, silently, for as long as
+	// they stay.
+	//
+	// So the fleet is left only when the channel is really gone. Asking costs a
+	// read, and the race it leaves is harmless in the direction that matters: a
+	// channel recreated in the gap keeps a subscription it would have opened
+	// again anyway.
+	if _, err := b.Broker.Find(ctx, g, name); !errors.Is(err, ErrNoChannel) {
+		return nil
+	}
+
 	return b.relay.Leave(name)
 }
 

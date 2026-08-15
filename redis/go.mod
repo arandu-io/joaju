@@ -15,16 +15,16 @@ go 1.26
 // github.com/arandu-io/hesape/redis, which is the connection this module
 // borrows rather than opening a second one, and as github.com/arandu-io/storage/s3.
 //
-// hesape/redis is required at a commit and not at a tag because it has no tag
-// of its own: it is a submodule of a repository whose tags name the parent. It
-// moves to a version the moment there is one.
+// hesape/redis carries a tag of its own, redis/v0.4.0, which is how a Go
+// submodule is versioned: the tag is the directory plus the version, and the
+// proxy serves it under the full module path.
 require (
-	github.com/arandu-io/hesape/redis v0.0.0-20260815144029-74628e246e99
+	github.com/arandu-io/hesape/redis v0.4.0
 	github.com/arandu-io/joaju v0.1.0
 )
 
 require (
-	github.com/arandu-io/hesape v0.3.0 // indirect
+	github.com/arandu-io/hesape v0.4.0 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/redis/go-redis/v9 v9.22.0 // indirect
 	go.uber.org/atomic v1.11.0 // indirect
