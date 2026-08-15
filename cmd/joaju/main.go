@@ -160,7 +160,7 @@ func newServer(cfg config, log *slog.Logger) (*joaju.Server, error) {
 			origins: cfg.AllowedOrigins,
 		},
 		Subscribe: subscribe,
-		Protocol:  frameLayer(broker, subscribe, cfg.ClientEvents, log),
+		Protocol:  frameLayer(broker, subscribe, cfg),
 		Log:       log,
 
 		// Relay is nil, so the four metrics routes answer for this process --
@@ -193,8 +193,21 @@ func newServer(cfg config, log *slog.Logger) (*joaju.Server, error) {
 // and it is the only line here that names a constructor rather than a type -- so
 // it is the only line that has to change if the frame layer is spelled
 // differently when it lands.
-func frameLayer(broker joaju.Broker, subscribe joaju.SubscriptionPolicy, events joaju.ClientEvents, log *slog.Logger) joaju.Protocol {
-	return joaju.NewPusher(broker, subscribe, events, log)
+func frameLayer(broker joaju.Broker, subscribe joaju.SubscriptionPolicy, cfg config) joaju.Protocol {
+	return joaju.NewPusher(broker, subscribe, joaju.PusherConfig{
+		// The client is told to ping at half the read deadline. It is an
+		// instruction a browser obeys and PongTimeout is a deadline the server
+		// enforces, so the first has to sit comfortably below the second: a
+		// client pinging at the deadline pings a socket already hung up on, and
+		// the round trip it needs has not even been spent yet.
+		//
+		// Zero PongTimeout means ServerConfig fills its own default, and this
+		// stays zero: the frame then leaves activity_timeout out and the client
+		// falls back to its own, which is the honest answer when this process
+		// does not know the number either.
+		ActivityTimeout: cfg.PongTimeout / 2,
+		ClientEvents:    cfg.ClientEvents,
+	})
 }
 
 // shutdown stops the process in the order that leaves nothing half-served.
