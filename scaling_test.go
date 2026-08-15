@@ -851,6 +851,20 @@ func (i *fleetTestInstance) get(t *testing.T, tenant, path string) (int, string)
 	return answer.Code, strings.TrimSpace(answer.Body.String())
 }
 
+// post calls one of the two publishing routes as a subject of the tenant, and
+// is [fleetTestInstance.get] for the direction that writes.
+func (i *fleetTestInstance) post(t *testing.T, tenant, path, body string) (int, string) {
+	t.Helper()
+
+	request := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+	request = request.WithContext(auth.WithSubject(request.Context(), auth.Subject{ID: "publisher", Tenant: tenant}))
+
+	answer := httptest.NewRecorder()
+	i.server.ServeHTTP(answer, request)
+
+	return answer.Code, strings.TrimSpace(answer.Body.String())
+}
+
 // route is one of the four, for the application this file's servers are.
 func fleetTestRoute(path string) string { return "/apps/" + fleetTestAppID + path }
 
@@ -883,6 +897,153 @@ func fleetTestDecode(t *testing.T, body string, into any) {
 
 	if err := json.Unmarshal([]byte(body), into); err != nil {
 		t.Fatalf("decoding %s = %v", body, err)
+	}
+}
+
+func TestAPublishedEventReachesTheOtherInstancesOnceAndStaysInItsTenant(t *testing.T) {
+	t.Parallel()
+
+	bus := newRelayTestBus()
+
+	// The same requested name under two customers. A client sees one name on the
+	// wire, and what keeps the two apart is the tenant inside the [Topic].
+	mine := relayTestName(t, "acme", "private-orders.17")
+	theirs := relayTestName(t, "globex", "private-orders.17")
+
+	here := &relayTestChannel{name: mine}
+	there := &relayTestChannel{name: mine}
+	elsewhere := &relayTestChannel{name: theirs}
+
+	first := newFleetTestInstance(t, "instance-one", bus, time.Second, here)
+	newFleetTestInstance(t, "instance-two", bus, time.Second, there, elsewhere)
+
+	waitFor(t, "both instances to relay acme's channel", func() bool {
+		return bus.listeners(Topic(mine)) == 2
+	})
+	waitFor(t, "globex's channel to be relayed", func() bool {
+		return bus.listeners(Topic(theirs)) == 1
+	})
+
+	status, body := first.post(t, "acme", fleetTestRoute("/events"),
+		`{"name":"order.paid","channel":"private-orders.17","data":"{\"id\":17}","socket_id":"1234.5678"}`)
+	if status != http.StatusOK {
+		t.Fatalf("publishing answered %d, want %d: %s", status, http.StatusOK, body)
+	}
+
+	waitFor(t, "the other instance to deliver", func() bool { return len(there.delivered()) > 0 })
+	// Nothing proves a negative. By the time the other instance has delivered,
+	// the message has been round the bus -- which is the moment the instance that
+	// published it would have delivered it a second time.
+	time.Sleep(20 * time.Millisecond)
+
+	delivered := there.delivered()
+	if len(delivered) != 1 {
+		t.Fatalf("the other instance delivered %d messages, want 1: %+v", len(delivered), delivered)
+	}
+	if delivered[0].Name != "order.paid" || string(delivered[0].Data) != `{"id":17}` {
+		t.Fatalf("the other instance delivered %+v, want the event that was published", delivered[0])
+	}
+	// The excluded socket travels, because the exclusion is fleet-wide: the
+	// socket that published is held by whichever instance it dialled.
+	if delivered[0].Socket != SocketID("1234.5678") {
+		t.Fatalf("the excluded socket is %q, want 1234.5678", delivered[0].Socket)
+	}
+	// The name came off the subscription this instance holds and never off the
+	// message, which is the whole of the tenant on this path.
+	if delivered[0].Channel.Tenant() != "acme" {
+		t.Fatalf("the delivered channel belongs to %q, want acme", delivered[0].Channel.Tenant())
+	}
+
+	if got := here.delivered(); len(got) != 1 {
+		t.Fatalf("the instance that published delivered %d messages, want the one local broadcast: %+v", len(got), got)
+	}
+	if got := elsewhere.delivered(); len(got) != 0 {
+		t.Fatalf("globex was handed acme's event: %+v", got)
+	}
+}
+
+func TestADegradedInstanceStillDeliversWhatItWasPublished(t *testing.T) {
+	t.Parallel()
+
+	bus := newRelayTestBus()
+	unreachable := errors.New("dial tcp 127.0.0.1:6379: connect: connection refused")
+	bus.fail(unreachable, unreachable)
+
+	name := relayTestName(t, "acme", "orders.17")
+	channel := &relayTestChannel{name: name}
+
+	alone := newFleetTestInstance(t, "instance-one", bus, time.Second, channel)
+
+	// A Redis that is down costs the other instances and costs the route
+	// nothing: the sockets this instance holds are still served, and a client
+	// whose event was delivered may not be told that it was not.
+	status, body := alone.post(t, "acme", fleetTestRoute("/events"),
+		`{"name":"order.paid","channel":"orders.17","data":"{\"id\":17}"}`)
+	if status != http.StatusOK {
+		t.Fatalf("publishing while the bus is down answered %d, want %d: %s", status, http.StatusOK, body)
+	}
+
+	if got := channel.delivered(); len(got) != 1 {
+		t.Fatalf("a degraded instance delivered %d messages to its own connections, want 1: %+v", len(got), got)
+	}
+
+	waitFor(t, "the outage to be reported", alone.relay.Degraded)
+
+	if written := alone.log.String(); !strings.Contains(written, "cannot reach the message bus") {
+		t.Fatalf("the outage was not written to the log:\n%s", written)
+	}
+}
+
+func TestASubscriptionJoinsTheFleetAndTheLastOneLeavingLeavesIt(t *testing.T) {
+	t.Parallel()
+
+	bus := newRelayTestBus()
+	log := &relayTestLog{}
+
+	relay, err := NewRelay(context.Background(), "instance-one", bus, log.logger())
+	if err != nil {
+		t.Fatalf("building the relay: %v", err)
+	}
+	defer func() { _ = relay.Close() }()
+
+	name := relayTestName(t, "acme", "private-orders.17")
+	channel := &relayTestChannel{name: name}
+	broker := relayedBroker{Broker: newFleetTestBroker(channel), relay: relay}
+	grant := relayTestGrant(t, "acme", broadcasting.ChannelJoin)
+
+	// A lookup is not a subscription. A metrics route naming a channel must not
+	// open a pipe from the fleet into an instance holding nobody on it.
+	if _, err := broker.Find(context.Background(), grant, name); err != nil {
+		t.Fatalf("finding the channel: %v", err)
+	}
+	if joined := relay.Joined(); joined != 0 {
+		t.Fatalf("a lookup relayed %d channels, want 0", joined)
+	}
+
+	if _, err := broker.FindOrCreate(context.Background(), grant, name); err != nil {
+		t.Fatalf("subscribing to the channel: %v", err)
+	}
+
+	waitFor(t, "the subscription to open", func() bool { return bus.listeners(Topic(name)) == 1 })
+
+	if joined := relay.Joined(); joined != 1 {
+		t.Fatalf("the subscription relayed %d channels, want 1", joined)
+	}
+
+	// The Grant is what makes the join sound, so a Grant issued for something
+	// else reaches no topic -- and a topic is the only way into a channel here.
+	if _, err := broker.FindOrCreate(context.Background(), relayTestGrant(t, "acme", Connect), name); err == nil {
+		t.Fatal("a Grant issued for Connect subscribed to a relayed channel")
+	}
+
+	if err := broker.Remove(context.Background(), grant, name); err != nil {
+		t.Fatalf("removing the channel: %v", err)
+	}
+
+	waitFor(t, "the subscription to close", func() bool { return bus.listeners(Topic(name)) == 0 })
+
+	if joined := relay.Joined(); joined != 0 {
+		t.Fatalf("%d channels are still relayed after the last subscriber left, want 0", joined)
 	}
 }
 

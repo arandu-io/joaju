@@ -1210,6 +1210,107 @@ func (r *Relay) newRequestID() string {
 	return string(r.id) + "." + rand.Text()
 }
 
+// relayedBroker is the [Broker] a server holds when it was built with a
+// [Relay], and it is the inbound half of horizontal scaling: what makes this
+// instance receive from the bus the channels it is actually holding, and only
+// those.
+//
+// The two methods it wraps are the two ends of a channel's life on one instance,
+// which is what [Broker] already says they are: [Broker.FindOrCreate] is what a
+// subscription calls, because the first subscriber is what brings a channel into
+// existence, and [Broker.Remove] is what the last subscriber leaving calls. So
+// the fleet's topic is joined where a channel appears here and left where it
+// goes, and neither a [Protocol] nor an application's Broker has to remember
+// either call.
+//
+// Not having to remember is the reason this wraps instead of being asked of
+// every implementation. [Broker] is an interface an application writes, and a
+// relay that had to be joined by hand would be joined by hand wrongly in exactly
+// one deployment -- where the symptom is a client hearing nothing, which from
+// inside a browser is indistinguishable from a quiet channel (RULE 9).
+//
+// [Broker.Find] and [Broker.All] are the embedded ones and are untouched,
+// because they read. A route that looks a channel up is not a socket listening
+// on one, and an instance that opened a pipe from the fleet for every channel a
+// dashboard mentioned would be receiving traffic it has nobody to deliver to.
+type relayedBroker struct {
+	Broker
+
+	// relay is the one this server was built with, and is never nil: a server
+	// without one holds the application's Broker unwrapped.
+	relay *Relay
+}
+
+// FindOrCreate is [Broker.FindOrCreate], and joins the fleet's topic for the
+// channel it answers with.
+//
+// The Grant is the subscriber's own, and it is what makes the join sound rather
+// than ceremonial: [Relay.Join] refuses one that did not authorize
+// broadcasting.ChannelJoin, and refuses one whose tenant is not the channel's.
+// What opens is the [Topic] of a name built from a Grant on this instance, so
+// what arrives on it can only be delivered to the channel of that tenant -- see
+// [Relay.deliver], which takes the name from here and never from the message.
+//
+// A join that fails fails the call, and what can fail it is why: a Grant issued
+// for something else, a Grant for another tenant, or a relay that is closed.
+// None of them is a bus that is down -- [Relay.Join] answers a
+// degraded relay successfully, because an outage costs the other instances and
+// not the subscription. So the only thing refused here is a subscription this
+// instance would have served alone while the client believed it was on the
+// fleet's channel, and that is worth refusing at the one moment it can still be
+// reported to whoever asked for it.
+func (b relayedBroker) FindOrCreate(ctx context.Context, g auth.Grant, name ChannelName) (Channel, error) {
+	held, err := b.Broker.FindOrCreate(ctx, g, name)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := b.relay.Join(g, held); err != nil {
+		return nil, fmt.Errorf("joaju: %s exists on this instance and cannot be relayed to the others: %w",
+			name.Requested(), err)
+	}
+
+	return held, nil
+}
+
+// Remove is [Broker.Remove], and stops relaying the channel it dropped.
+//
+// The order is the one [Relay.Leave] names its caller in: the channel goes
+// first and the subscription second, so a message arriving between the two
+// finds a channel with nobody on it rather than a topic this instance has
+// already left. Neither costs anything -- a broadcast to no subscribers writes
+// no bytes -- and one of the two orders had to be the written one.
+func (b relayedBroker) Remove(ctx context.Context, g auth.Grant, name ChannelName) error {
+	if err := b.Broker.Remove(ctx, g, name); err != nil {
+		return err
+	}
+
+	return b.relay.Leave(name)
+}
+
+// carry hands the fleet an event this instance has already delivered, and is the
+// outbound half of horizontal scaling.
+//
+// It is called by [Server.publish] after [Channel.Broadcast] and never instead
+// of it, which is the order [Relay] describes: the sockets here were served by
+// the broadcast, and this is only about the instances holding the others.
+//
+// Nothing it does can fail the request that caused it. [Relay.Publish] answers a
+// bus it cannot reach with nil -- what an outage costs is reach, and the
+// delivery has already happened -- so an error here is a malformed event or a
+// closed relay, and both are recorded rather than returned. The caller was told
+// its event was delivered, and it was.
+func (s *Server) carry(ctx context.Context, e Event) {
+	if s.relay == nil {
+		return
+	}
+
+	if err := s.relay.Publish(ctx, e); err != nil {
+		s.log.ErrorContext(ctx, "joaju: an event delivered to this instance's connections was not handed to the fleet",
+			"tenant", e.Channel.Tenant(), "channel", e.Channel.Requested(), "event", e.Name, "error", err)
+	}
+}
+
 // tenantConnections is how many sockets this instance holds for one tenant, and
 // is what it answers the fleet with. It is [fleetLocal].
 //

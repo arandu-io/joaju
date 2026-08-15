@@ -134,11 +134,14 @@ type ServerConfig struct {
 	// Protocol is the frame layer. See [Protocol].
 	Protocol Protocol
 
-	// Relay is the other instances. With one, the four metrics routes answer
-	// for the whole fleet; without one they answer for this process, which is
-	// the true answer for a deployment of one and the wrong answer for any
-	// other -- two instances serving one application each hold half the sockets
-	// and neither can see the other half.
+	// Relay is the other instances, and a deployment of more than one needs it.
+	// With one, an event published here reaches the sockets the other instances
+	// hold, what they publish reaches the sockets held here, and the four
+	// metrics routes answer for the whole fleet. Without one, each of those
+	// three is answered by this process alone -- which is the true answer for a
+	// deployment of one and the wrong answer for any other: two instances
+	// serving one application each hold half the sockets, and neither can see
+	// the other half.
 	//
 	// It is optional because a relay is a Redis, and a server that refused to
 	// start without one would make the single-instance deployment the harder of
@@ -251,7 +254,9 @@ type Server struct {
 	protocol  Protocol
 	log       *slog.Logger
 	// relay is the other instances, or nil for a deployment of one. It is what
-	// the four metrics routes ask, and nothing else here reads it.
+	// the four metrics routes ask and what [Server.carry] hands an event to; the
+	// other direction arrives through [relayedBroker], which is what broker is
+	// whenever this is not nil.
 	relay *Relay
 
 	upgrader ws.Upgrader
@@ -386,6 +391,10 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 			return nil, fmt.Errorf("joaju: this server cannot answer the fleet through its relay: %w", err)
 		}
 		s.relay = cfg.Relay
+		// The application's Broker is wrapped and not replaced: a subscription
+		// that brings a channel into existence here joins the fleet's topic for
+		// it, and the last subscriber leaving leaves it. See [relayedBroker].
+		s.broker = relayedBroker{Broker: s.broker, relay: cfg.Relay}
 	}
 
 	return s, nil
@@ -741,11 +750,14 @@ func (s *Server) handleBatchEvents(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, struct{}{})
 }
 
-// publish delivers one event to every channel it names.
+// publish delivers one event to every channel it names, on this instance and on
+// the others.
 //
-// A channel nobody is subscribed to is not an error: the Broker has no channel
-// under that name, and an event with no listener is delivered to no one, which
-// is what happened either way.
+// A channel nobody is subscribed to HERE is not an error, and it is not the end
+// of the event either: this instance holds no channel under that name, and the
+// instance holding the sockets that are on it is usually not the one that took
+// the request. So the local delivery is skipped and [Server.carry] runs anyway.
+// On a deployment of one that is the same "delivered to no one" it always was.
 func (s *Server) publish(ctx context.Context, connected auth.Grant, body publishRequest) error {
 	if body.Name == "" {
 		return errors.New("joaju: an event needs a name")
@@ -783,25 +795,31 @@ func (s *Server) publish(ctx context.Context, connected auth.Grant, body publish
 			return err
 		}
 
-		channel, err := s.broker.Find(ctx, grant, name)
-		if errors.Is(err, ErrNoChannel) {
-			continue
-		}
-		if err != nil {
-			return err
-		}
-
-		// Broadcast and not BroadcastToAll: an empty [Event.Socket] already
-		// means everybody, so the sender is excluded when there is one and
-		// nobody is when there is not, through one call.
-		if err := channel.Broadcast(ctx, Event{
+		event := Event{
 			Name:    body.Name,
 			Channel: name,
 			Data:    json.RawMessage(body.Data),
 			Socket:  SocketID(body.SocketID),
-		}); err != nil {
-			return err
 		}
+
+		channel, err := s.broker.Find(ctx, grant, name)
+		switch {
+		case errors.Is(err, ErrNoChannel):
+			// Nobody here is on it. The fleet still hears about it, below.
+		case err != nil:
+			return err
+		default:
+			// Broadcast and not BroadcastToAll: an empty [Event.Socket] already
+			// means everybody, so the sender is excluded when there is one and
+			// nobody is when there is not, through one call.
+			if err := channel.Broadcast(ctx, event); err != nil {
+				return err
+			}
+		}
+
+		// The other instances, after the local delivery and never instead of
+		// it. This does not fail the request -- see [Server.carry].
+		s.carry(ctx, event)
 	}
 
 	return nil
