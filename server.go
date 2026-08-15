@@ -63,7 +63,11 @@ const (
 // The server owns the socket -- the upgrade, the two goroutines, the deadlines,
 // the registry -- and owns no part of the Pusher protocol. It sends no frame of
 // its own, not even [EventConnectionEstablished], because a second place that
-// builds a frame is a second answer to what a frame looks like (RULE 9).
+// builds a frame is a second answer to what a frame looks like (RULE 9). The
+// one it does put on the wire is a refusal this package already declared and it
+// only encodes -- [ErrRateLimited], when [ServerConfig.MaxMessagesPerSecond] is
+// what dropped the frame -- because that limit is the socket's and a Protocol
+// cannot answer for a frame it was never handed.
 //
 // The three methods are Reverb's Protocols\Pusher\Server: open(), message() and
 // close(). Its fourth, error(), is not here -- in Go the error comes back from
@@ -149,6 +153,29 @@ type ServerConfig struct {
 	// which is a denial of service one of them did not cause and cannot see.
 	MaxConnections int
 
+	// MaxMessagesPerSecond is how many frames ONE SOCKET may send in a second.
+	// Zero, which is the default, is no limit.
+	//
+	// Per socket and not per tenant, which is the opposite of what
+	// MaxConnections does and is the same reasoning taken one layer in: a socket
+	// is the smallest thing a noisy client owns, so metering it spends nothing
+	// of what the tenant's other sockets have. An allowance shared across a
+	// tenant would let one runaway browser tab refuse the frames of every other
+	// tab that customer has open, which is the denial of service the connection
+	// limit exists to keep out.
+	//
+	// Zero is no limit rather than a Default of its own, because there is no
+	// rate that is right for traffic this server has not seen: a chat client and
+	// one that reports a cursor position differ by two orders of magnitude, and
+	// a limit that refuses the frames of a correct client is worse than no limit
+	// at all. It is turned on by a deployment that measured its own traffic.
+	//
+	// A frame past the limit is answered with [ErrRateLimited] and dropped, and
+	// the socket stays open. There is no second setting that closes it instead:
+	// two ways to answer one refusal is two behaviours to explain (RULE 9), and
+	// the client that a limit is aimed at is the one worth keeping addressable.
+	MaxMessagesPerSecond int
+
 	// Observer is told what happened, after it happened. Nil means
 	// [NopObserver]. See [Observer] for why nothing there can refuse anything.
 	Observer      Observer
@@ -214,6 +241,9 @@ type Server struct {
 	pingInterval   time.Duration
 	pongTimeout    time.Duration
 	maxConnections int
+	// maxMessagesPerSecond is zero unless a deployment asked for a limit. It is
+	// read once per socket, into the bucket the reading goroutine keeps.
+	maxMessagesPerSecond int
 
 	// observer is never nil. See [NopObserver] for why.
 	observer Observer
@@ -266,6 +296,9 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	if s.observer == nil {
 		s.observer = NopObserver{}
 	}
+	// Zero is the whole answer for the rate limit -- it means off -- so unlike
+	// every field below it there is no Default to fall back to.
+	s.maxMessagesPerSecond = cfg.MaxMessagesPerSecond
 	if s.maxConnections == 0 {
 		s.maxConnections = DefaultMaxConnections
 	}
@@ -535,6 +568,11 @@ func (s *Server) read(r *http.Request, conn *Connection, socket *ws.Conn) {
 		return socket.SetReadDeadline(time.Now().Add(s.pongTimeout))
 	})
 
+	// The rate limit is one socket's, so it lives on this goroutine's stack: no
+	// map that grows with the connection count, no lock, and nothing to evict
+	// when the socket ends.
+	limiter := newRateLimiter(s.maxMessagesPerSecond, time.Now())
+
 	for {
 		_, message, err := socket.ReadMessage()
 		if err != nil {
@@ -545,6 +583,19 @@ func (s *Server) read(r *http.Request, conn *Connection, socket *ws.Conn) {
 			return
 		}
 		_ = socket.SetReadDeadline(time.Now().Add(s.pongTimeout))
+
+		// Counted here, where a frame the client sent has arrived and nothing
+		// has acted on it yet. The WebSocket ping and pong never reach this
+		// point -- the fork answers them inside ReadMessage -- and they should
+		// not: they are the transport keeping itself alive, not the client
+		// asking for anything.
+		if !limiter.allow(time.Now()) {
+			s.log.InfoContext(ctx, "joaju: a frame was dropped by the socket's rate limit",
+				slog.String("socket", string(conn.ID())),
+				slog.Int("limit", s.maxMessagesPerSecond))
+			_ = conn.Send(ctx, rateLimitedFrame)
+			continue
+		}
 
 		// A refused frame is not a refused socket. A client that asks for a
 		// channel it may not have is told so and goes on using the ones it has.
@@ -1124,4 +1175,94 @@ func (k *sink) flush() {
 			return
 		}
 	}
+}
+
+// rateLimitedFrame is [ErrRateLimited] on the wire, encoded once for the
+// process.
+//
+// The error is discarded for the reason [ProtocolError.Frame] discards its own:
+// an event name and a struct of an int and a string have no encoding that can
+// fail. Encoding it per refusal would spend the most work on the socket this
+// exists to spend less on.
+var rateLimitedFrame, _ = Encode(ErrRateLimited.Frame())
+
+// rateLimiter meters one socket's inbound frames, and is the whole of
+// [ServerConfig.MaxMessagesPerSecond].
+//
+// It is a token bucket and not a count reset every second, because a counted
+// window has an edge: a client that spends its whole allowance at 0.99s and
+// again at 1.01s puts twice the limit through in two milliseconds and trips
+// nothing. A bucket has no edge -- it is refilled by the time that actually
+// passed, so what a client spends early it does not have later.
+//
+// It is three words held by the goroutine that reads the socket, and that is
+// the design: [Protocol] says calls concerning one connection are never
+// concurrent, so there is nothing to lock, and a bucket kept on the stack of a
+// loop is freed when the loop ends. A map of limiters would need a mutex on the
+// per-frame path and an eviction for every socket that ever connected; a
+// goroutine per connection would double what a connection costs.
+type rateLimiter struct {
+	// limit is the bucket's size and the frames one second buys. Zero is no
+	// limit, and [rateLimiter.allow] answers that before anything else.
+	limit int
+	// cost is what one frame spends: a second divided by limit. It is computed
+	// once because it is a division on the per-frame path, and because a limit
+	// finer than a nanosecond rounds it to zero -- which is the divisor below,
+	// and a zero there is a panic on a live socket.
+	cost time.Duration
+	// tokens is what is left to spend, and never exceeds limit.
+	tokens int
+	// filled is the instant the tokens on hand were earned at. It advances by
+	// the time a refill actually consumed rather than straight to now, so the
+	// fraction of a token that had not been earned yet is not thrown away.
+	filled time.Time
+}
+
+// newRateLimiter starts the bucket full, so that the first frames of a
+// connection are not the ones refused: a client subscribing to six channels the
+// moment it opens is doing what a client does.
+//
+// A limit of zero or less, or one so fine that a frame costs less than a
+// nanosecond, is no limit at all and produces the zero value.
+func newRateLimiter(limit int, now time.Time) rateLimiter {
+	if limit <= 0 || time.Second/time.Duration(limit) == 0 {
+		return rateLimiter{}
+	}
+
+	return rateLimiter{
+		limit:  limit,
+		cost:   time.Second / time.Duration(limit),
+		tokens: limit,
+		filled: now,
+	}
+}
+
+// allow reports whether one frame may be spent at now, and spends it if it may.
+//
+// now is a parameter and not a call to time.Now inside, so that a test can say
+// what a second is instead of sleeping through one.
+func (l *rateLimiter) allow(now time.Time) bool {
+	if l.limit <= 0 {
+		return true
+	}
+
+	if elapsed := now.Sub(l.filled); elapsed >= l.cost {
+		room := int64(l.limit - l.tokens)
+		if earned := int64(elapsed / l.cost); earned < room {
+			l.tokens += int(earned)
+			l.filled = l.filled.Add(time.Duration(earned) * l.cost)
+		} else {
+			// The bucket filled somewhere inside that gap and the time after
+			// that earned nothing. Starting again from now is what stops a
+			// socket that idled an hour from holding an hour of credit.
+			l.tokens = l.limit
+			l.filled = now
+		}
+	}
+	if l.tokens == 0 {
+		return false
+	}
+	l.tokens--
+
+	return true
 }

@@ -964,3 +964,124 @@ func TestServerTellsARefusedSocketItIsOverQuotaBeforeClosingIt(t *testing.T) {
 		t.Fatalf("the protocol was handed %v, want only the admitted socket", opened)
 	}
 }
+
+// skipOpenFrame reads the frame the fixture's Protocol writes in Open, so that
+// what a test reads afterwards is an answer to what it sent.
+func (f *serverFixture) skipOpenFrame(t *testing.T, conn *ws.Conn) {
+	t.Helper()
+
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if _, _, err := conn.ReadMessage(); err != nil {
+		t.Fatalf("reading the frame the Protocol wrote on open = %v", err)
+	}
+}
+
+// waitFor waits until the fixture's Protocol has been handed the frame, and
+// answers everything it holds. A frame the server dropped never arrives, which
+// is what the deadline is for.
+func (f *serverFixture) waitFor(t *testing.T, frame string) []string {
+	t.Helper()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		held := f.protocol.received()
+		for _, one := range held {
+			if one == frame {
+				return held
+			}
+		}
+		if time.Now().After(deadline) {
+			return held
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// Past the limit the client is told 4301 and keeps its socket. Reverb closes it
+// too when terminate_on_limit is set, and that setting is not here: a refusal
+// that answers two ways is two behaviours to explain (RULE 9), and the client a
+// limit is aimed at is the one worth keeping addressable.
+func TestServerRefusesTheFramesPastTheSocketsRateLimit(t *testing.T) {
+	const limit = 4
+	f := newServerFixture(t, joaju.ServerConfig{MaxMessagesPerSecond: limit})
+
+	conn, _, err := f.dial(t, "http://"+f.host(t))
+	if err != nil {
+		t.Fatalf("dialling = %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+	f.skipOpenFrame(t, conn)
+
+	const burst = limit + 4
+	for i := range burst {
+		if err := conn.WriteMessage(ws.TextMessage, []byte(`{"event":"pusher:ping"}`)); err != nil {
+			t.Fatalf("writing frame %d of the burst = %v", i, err)
+		}
+	}
+
+	// The socket answered, which a closed one could not have done.
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	_, message, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatalf("reading the answer to a burst past the limit = %v", err)
+	}
+	if want := encode(t, joaju.ErrRateLimited.Frame()); string(message) != want {
+		t.Fatalf("the answer to a burst past the limit was %s, want %s", message, want)
+	}
+
+	// And it is still serving: one refill later a frame gets through, and it
+	// reaches the Protocol like any other.
+	time.Sleep(time.Second/limit + 100*time.Millisecond)
+	const after = `{"event":"pusher:pong"}`
+	if err := conn.WriteMessage(ws.TextMessage, []byte(after)); err != nil {
+		t.Fatalf("writing after the limit tripped = %v", err)
+	}
+
+	held := f.waitFor(t, after)
+	if len(held) == 0 || held[len(held)-1] != after {
+		t.Fatalf("the protocol holds %v, want the frame sent after the refill: the socket did not survive the refusal", held)
+	}
+	if len(held) > burst {
+		t.Fatalf("the protocol was handed %d frames of the %d sent, so the limit dropped none of them", len(held), burst+1)
+	}
+}
+
+// Under the limit nothing happens at all: every frame reaches the Protocol and
+// the client is told nothing.
+func TestServerLeavesASocketUnderItsRateLimitAlone(t *testing.T) {
+	f := newServerFixture(t, joaju.ServerConfig{MaxMessagesPerSecond: 100})
+
+	conn, _, err := f.dial(t, "http://"+f.host(t))
+	if err != nil {
+		t.Fatalf("dialling = %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+	f.skipOpenFrame(t, conn)
+
+	frames := []string{
+		`{"event":"pusher:subscribe","data":{"channel":"orders.17"}}`,
+		`{"event":"pusher:ping"}`,
+		`{"event":"pusher:unsubscribe","data":{"channel":"orders.17"}}`,
+	}
+	for i, one := range frames {
+		if err := conn.WriteMessage(ws.TextMessage, []byte(one)); err != nil {
+			t.Fatalf("writing frame %d = %v", i, err)
+		}
+	}
+
+	if held := f.waitFor(t, frames[len(frames)-1]); len(held) != len(frames) {
+		t.Fatalf("the protocol was handed %v, want all %d frames: none of them was past the limit", held, len(frames))
+	}
+
+	// Nothing came back. The deadline is the assertion: a 4301 would arrive
+	// long before it, and a closed socket would answer with a close error.
+	_ = conn.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
+	_, message, err := conn.ReadMessage()
+	if err == nil {
+		t.Fatalf("a socket under its limit was sent %s", message)
+	}
+	var closed *ws.CloseError
+	if errors.As(err, &closed) {
+		t.Fatalf("a socket under its limit was closed: %v", closed)
+	}
+}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"sync"
 	"testing"
+	"time"
 )
 
 // connFor is a connection held by user of tenant, using the same handshake
@@ -156,5 +157,62 @@ func TestTheCounterIsSafeUnderConcurrency(t *testing.T) {
 	}
 	if got := c.Read(counterAllTenants).Sent; got != 50 {
 		t.Errorf("counted %d sends, want 50", got)
+	}
+}
+
+// The rate limit is a bucket and not a counted window, and the difference is
+// that time buys the allowance back a piece at a time rather than all at once
+// on a boundary.
+func TestTheRateLimitRefillsByTheTimeThatPassed(t *testing.T) {
+	start := time.Now()
+	l := newRateLimiter(2, start)
+
+	if !l.allow(start) || !l.allow(start) {
+		t.Fatal("the bucket refused a frame inside the second it was given")
+	}
+	if l.allow(start) {
+		t.Fatal("the bucket allowed a third frame in an instant that buys two")
+	}
+
+	// Half a second at two a second is worth one frame, and exactly one.
+	half := start.Add(500 * time.Millisecond)
+	if !l.allow(half) {
+		t.Fatal("half a second earned nothing back at two frames a second")
+	}
+	if l.allow(half) {
+		t.Fatal("half a second earned back both frames, so the refill is not the time that passed")
+	}
+}
+
+// Credit does not accumulate: an hour of silence is still worth one second, or
+// a client that says nothing all night gets to spend the night at once.
+func TestTheRateLimitDoesNotBankAnIdleSocketsAllowance(t *testing.T) {
+	start := time.Now()
+	l := newRateLimiter(2, start)
+
+	if !l.allow(start) || !l.allow(start) || l.allow(start) {
+		t.Fatal("the bucket did not start at the limit it was given")
+	}
+
+	idle := start.Add(time.Hour)
+	if !l.allow(idle) || !l.allow(idle) {
+		t.Fatal("an idle hour did not refill the bucket")
+	}
+	if l.allow(idle) {
+		t.Fatal("an idle hour banked more than the bucket holds")
+	}
+}
+
+// Zero is what a server nobody configured a limit on has, and it is not a limit
+// of zero frames.
+func TestTheRateLimitIsOffWhenItIsNotSet(t *testing.T) {
+	for _, limit := range []int{0, -1} {
+		l := newRateLimiter(limit, time.Now())
+		now := time.Now()
+		for i := range 1_000 {
+			if !l.allow(now) {
+				t.Fatalf("limit %d refused frame %d, and an unset limit refuses nothing", limit, i)
+			}
+		}
 	}
 }
