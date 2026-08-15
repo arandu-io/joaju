@@ -801,7 +801,7 @@ func newFleetTestInstance(t *testing.T, id InstanceID, bus Bus, wait time.Durati
 	server, err := NewServer(ServerConfig{
 		AppID:          fleetTestAppID,
 		AppKey:         fleetTestAppKey,
-		Broker:         newFleetTestBroker(channels...),
+		Broker:         RelayedBroker(newFleetTestBroker(channels...), relay),
 		Connect:        channelTestConnectPolicy{},
 		Subscribe:      relayTestPolicy{},
 		Protocol:       fleetTestProtocol{},

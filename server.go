@@ -302,6 +302,21 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		return nil, errors.New("joaju: a server needs a Protocol to hand a socket's frames to")
 	}
 
+	// A Relay whose Broker does not carry it is half a fleet: this server would
+	// relay what its own API publishes and never subscribe to what the others
+	// publish, so a socket here would miss every event raised anywhere else.
+	//
+	// It cannot be fixed by wrapping here. The Protocol was built before the
+	// server and holds the Broker it was handed; wrapping at this point would
+	// leave that one raw, and the failure would be silent -- the worst of the
+	// three outcomes. So it is refused, and the message carries the line that
+	// fixes it. See [RelayedBroker].
+	if cfg.Relay != nil {
+		if _, ok := cfg.Broker.(relayedBroker); !ok {
+			return nil, errors.New("joaju: a server with a Relay needs a Broker from RelayedBroker, and the same value has to reach the Protocol: broker := joaju.RelayedBroker(base, relay)")
+		}
+	}
+
 	s := &Server{
 		appID:          cfg.AppID,
 		appKey:         cfg.AppKey,
@@ -391,10 +406,6 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 			return nil, fmt.Errorf("joaju: this server cannot answer the fleet through its relay: %w", err)
 		}
 		s.relay = cfg.Relay
-		// The application's Broker is wrapped and not replaced: a subscription
-		// that brings a channel into existence here joins the fleet's topic for
-		// it, and the last subscriber leaving leaves it. See [relayedBroker].
-		s.broker = relayedBroker{Broker: s.broker, relay: cfg.Relay}
 	}
 
 	return s, nil

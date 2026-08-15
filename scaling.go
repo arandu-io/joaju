@@ -1233,6 +1233,44 @@ func (r *Relay) newRequestID() string {
 // because they read. A route that looks a channel up is not a socket listening
 // on one, and an instance that opened a pipe from the fleet for every channel a
 // dashboard mentioned would be receiving traffic it has nobody to deliver to.
+// RelayedBroker is the [Broker] an instance uses when it is one of several.
+//
+// It wraps the application's Broker so that a channel coming into existence here
+// subscribes this instance to the fleet's topic for it, and the last subscriber
+// leaving unsubscribes. Without it an instance relays what its own API publishes
+// and never hears what the others publish.
+//
+// # Wire it once and hand it to both
+//
+// The same value has to reach the [Protocol] -- [NewPusher] takes a Broker --
+// and [ServerConfig.Broker]. A Protocol holding the raw Broker never joins a
+// topic, however well the server is configured, because a socket's subscription
+// passes through the Protocol and not through the server.
+//
+//	relay, err := joaju.NewRelay(ctx, id, bus, log)
+//	broker := joaju.RelayedBroker(joaju.NewMemoryBroker(), relay)
+//	protocol := joaju.NewPusher(broker, subscribe, joaju.PusherConfig{})
+//	server, err := joaju.NewServer(joaju.ServerConfig{
+//		Broker: broker, Protocol: protocol, Relay: relay,
+//	})
+//
+// [NewServer] refuses a Relay whose Broker did not come from here, so the
+// half-wired arrangement is a startup error and not a message that never
+// arrives.
+//
+// A nil relay returns base unchanged, and wrapping twice returns the wrapper
+// rather than a second layer.
+func RelayedBroker(base Broker, relay *Relay) Broker {
+	if base == nil || relay == nil {
+		return base
+	}
+	if _, ok := base.(relayedBroker); ok {
+		return base
+	}
+
+	return relayedBroker{Broker: base, relay: relay}
+}
+
 type relayedBroker struct {
 	Broker
 
