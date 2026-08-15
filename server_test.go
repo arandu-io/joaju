@@ -866,3 +866,101 @@ func TestServerRefusesASocketTheConnectPolicyRefuses(t *testing.T) {
 		t.Fatalf("the protocol saw %v, want nothing: the decision happens before the upgrade", opened)
 	}
 }
+
+// serverLimitObserver records why the sockets it saw ended, so a test can say
+// the refusal still reaches an Observer with the reason it always carried.
+type serverLimitObserver struct {
+	joaju.NopObserver
+
+	mu      sync.Mutex
+	reasons []string
+}
+
+func (o *serverLimitObserver) ConnectionClosed(_ context.Context, _ joaju.SocketID, _, reason string) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.reasons = append(o.reasons, reason)
+}
+
+func (o *serverLimitObserver) closed() []string {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+
+	return append([]string(nil), o.reasons...)
+}
+
+// A socket refused because the tenant is full is told 4004, and told it before
+// the close.
+//
+// A close on its own is exactly what a dropped network looks like, and what a
+// Pusher client does about a dropped network is dial again -- so a tenant at
+// its limit would be reconnected to for as long as it stayed there.
+func TestServerTellsARefusedSocketItIsOverQuotaBeforeClosingIt(t *testing.T) {
+	observer := &serverLimitObserver{}
+	f := newServerFixture(t, joaju.ServerConfig{MaxConnections: 1, Observer: observer})
+
+	held, _, err := f.dial(t, "http://"+f.host(t))
+	if err != nil {
+		t.Fatalf("dialling the one connection the limit allows = %v", err)
+	}
+	defer func() { _ = held.Close() }()
+
+	// Read what the Protocol wrote on the admitted socket, so the second dial
+	// happens with the first one registered rather than still in flight.
+	_ = held.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if _, _, err := held.ReadMessage(); err != nil {
+		t.Fatalf("reading the admitted socket's first frame = %v", err)
+	}
+
+	refused, response, err := f.dial(t, "http://"+f.host(t))
+	if err != nil {
+		t.Fatalf("dialling past the limit = %v, answered %v -- the limit is refused after the upgrade, not during it", err, response)
+	}
+	defer func() { _ = refused.Close() }()
+
+	_ = refused.SetReadDeadline(time.Now().Add(5 * time.Second))
+	_, message, err := refused.ReadMessage()
+	if err != nil {
+		t.Fatalf("reading the refusal = %v -- the socket was closed without saying why", err)
+	}
+
+	var frame struct {
+		Event string `json:"event"`
+		Data  string `json:"data"`
+	}
+	if err := json.Unmarshal(message, &frame); err != nil {
+		t.Fatalf("the refusal %q is not a frame: %v", message, err)
+	}
+	if frame.Event != joaju.EventError {
+		t.Fatalf("the refused socket was sent %q, want %q", frame.Event, joaju.EventError)
+	}
+
+	var data struct {
+		Code    joaju.ErrorCode `json:"code"`
+		Message string          `json:"message"`
+	}
+	if err := json.Unmarshal([]byte(frame.Data), &data); err != nil {
+		t.Fatalf("the refusal's data %q is not the error payload: %v", frame.Data, err)
+	}
+	if data.Code != joaju.CodeOverQuota {
+		t.Fatalf("the refused socket was told %d, want %d", data.Code, joaju.CodeOverQuota)
+	}
+
+	// And then it closes, because the frame is a refusal and not a connection.
+	_ = refused.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if _, _, err := refused.ReadMessage(); err == nil {
+		t.Fatal("the socket refused by the tenant's limit stayed open")
+	}
+
+	// The close the client just saw happened after the Observer was told, so
+	// this reads what the refusal reported and not a half-written slice.
+	if got := observer.closed(); len(got) != 1 || got[0] != joaju.ReasonLimit {
+		t.Fatalf("the Observer was told %v, want one close with the reason %q", got, joaju.ReasonLimit)
+	}
+
+	// The Protocol never saw the refused socket: the limit is checked before it
+	// is handed over, so nothing subscribed on a connection that was refused.
+	if opened := f.protocol.sockets(); len(opened) != 1 {
+		t.Fatalf("the protocol was handed %v, want only the admitted socket", opened)
+	}
+}

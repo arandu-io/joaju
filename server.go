@@ -486,8 +486,29 @@ func (s *Server) read(r *http.Request, conn *Connection, socket *ws.Conn) {
 	if err := s.register(conn); err != nil {
 		s.log.WarnContext(ctx, "joaju: the connection was refused by the tenant's limit",
 			slog.String("socket", string(conn.ID())), slog.String("tenant", conn.Tenant()))
+		// The refusal is written before the socket goes. A socket that only
+		// closes says nothing a dropped network does not also say, and what a
+		// client does about a dropped network is dial again -- so a tenant at
+		// its limit would be dialled in a loop for as long as it stayed there.
+		// 4004 is the code the Pusher clients already branch on, and it is the
+		// one Reverb sends here, so a client that handles Reverb handles this.
+		//
+		// Saying so is best effort: a write that fails is logged and the close
+		// goes ahead, because a socket that will not take the frame is a socket
+		// there is nothing left to say to. context.WithoutCancel for the reason
+		// Terminate uses it -- the request's context is often already cancelled
+		// by the time an upgraded socket is refused, and a cancelled context
+		// would drop the very frame that stops the loop.
+		closing := context.WithoutCancel(ctx)
+		if quota, encodeErr := Encode(ErrOverQuota.Frame()); encodeErr != nil {
+			s.log.ErrorContext(ctx, "joaju: encoding the over-quota refusal failed",
+				slog.Any("error", encodeErr))
+		} else if sendErr := conn.Send(closing, quota); sendErr != nil {
+			s.log.InfoContext(ctx, "joaju: the refused socket was closed without being told why",
+				slog.String("socket", string(conn.ID())), slog.Any("error", sendErr))
+		}
 		s.observer.ConnectionClosed(ctx, conn.ID(), conn.Tenant(), ReasonLimit)
-		_ = conn.Terminate(context.WithoutCancel(ctx))
+		_ = conn.Terminate(closing)
 		return
 	}
 	s.observer.ConnectionOpened(ctx, conn.ID(), conn.Tenant())
@@ -1069,12 +1090,37 @@ func (k *sink) write() {
 				return
 			}
 		case <-k.done:
+			// What was queued before the close goes out first. A refusal is
+			// queued and terminated in the same breath -- the connection limit
+			// is the one that does it -- and a select whose two cases are both
+			// ready picks between them at random, so without this the frame
+			// that explains the close is a coin toss.
+			k.flush()
 			// A close frame first, so the client is told rather than left to
 			// find out from a reset. Whether it arrives is not worth waiting
 			// on: the socket is closed either way by the deferred Close.
 			_ = k.conn.SetWriteDeadline(time.Now().Add(k.writeTimeout))
 			_ = k.conn.WriteMessage(ws.CloseMessage,
 				ws.FormatClose(ws.CloseNormalClosure, ""))
+			return
+		}
+	}
+}
+
+// flush writes the frames already queued when the socket closed.
+//
+// It stops at the first write that fails, because the socket is going away
+// either way, and it never writes more than the queue holds: a broadcast still
+// reaching this socket while it closes must not keep the writer here.
+func (k *sink) flush() {
+	for i := 0; i < cap(k.out); i++ {
+		select {
+		case message := <-k.out:
+			_ = k.conn.SetWriteDeadline(time.Now().Add(k.writeTimeout))
+			if err := k.conn.WriteMessage(ws.TextMessage, message); err != nil {
+				return
+			}
+		default:
 			return
 		}
 	}
