@@ -1,0 +1,5 @@
+# Output of run.sh: the suite's own reports and the scratch directory holding
+# the built echo server, its log and the substituted spec. REPORT.txt is the
+# part that is committed, because it is the answer to "what did the suite say".
+/reports/
+/.work/

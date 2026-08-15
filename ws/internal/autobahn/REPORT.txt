@@ -1,0 +1,25 @@
+Autobahn TestSuite against the ws package of github.com/arandu-io/joaju
+run at:     2026-08-15 18:26:05 UTC
+target:     ws://host.docker.internal:9001
+image:      crossbario/autobahn-testsuite:latest (linux/amd64)
+suite:      Autobahn 18, all cases except 12.* and 13.* (permessage-deflate,
+            not implemented -- the same pair laravel/reverb excludes)
+pass rule:  OK or NON-STRICT, and a closing handshake of OK or INFORMATIONAL
+
+agent: joaju/ws
+cases run: 301
+  INFORMATIONAL  3
+  NON-STRICT     3
+  OK             295
+failures: 0
+
+non-strict (6.4.2, 6.4.3, 6.4.4)
+  a pass. The suite got the outcome it allows rather than the one it
+  prefers -- on the 6.4 cases that is failing an invalid text payload
+  at the end of the frame carrying it instead of at the bad octet.
+
+not scored by the suite (7.1.6, 7.13.1, 7.13.2)
+  these cases say their outcome depends on implementation defined
+  close behaviour, so the suite compares them against nothing.
+
+PASS: 301 cases, 0 failures
