@@ -12,10 +12,50 @@ jobs:
   check:
     runs-on: ubuntu-latest
 
-    # No service container. Everything this repository does today it does in
-    # memory: the transport is its own, the bus the relay talks to is an
-    # interface, and the tests drive both through real sockets on a loopback
-    # listener. When the Redis relay lands, this is where its server goes.
+    # One job per module: a single job with two `cd`s hides which one broke, and
+    # the root job cannot reach the other module anyway -- `go vet ./...` and
+    # `go test ./...` stop at a directory carrying its own go.mod, so redis/ was
+    # compiled and run by nothing here until it got an entry of its own. The
+    # binary needs no entry: cmd/joaju is a package of the root module and the
+    # root `./...` already covers it.
+    strategy:
+      fail-fast: false
+      matrix:
+        module: [".", "redis"]
+
+    defaults:
+      run:
+        working-directory: ${{ matrix.module }}
+
+    # The relay landed, so here is its server. What redis/ claims is a claim
+    # about a protocol -- that a PUBLISH on one connection reaches a SUBSCRIBE
+    # on another, that publishing works on a connection which is subscribed, and
+    # that a subscription is still there after its socket died -- and a fake that
+    # implements the happy path answers none of the three.
+    #
+    # Valkey rather than Redis: same RESP, and it is the fork that stayed open
+    # source. Dragonfly is the recommended default in production and answers the
+    # same protocol -- doc 11. The variable is REDIS_ADDRESS because that is the
+    # name redis/redis_test.go reads, and the default it falls back to is this
+    # same address.
+    #
+    # The container runs for both entries of the matrix rather than only for the
+    # one that uses it: a conditional here would be one more thing to get wrong,
+    # and an unused container costs seconds.
+    services:
+      redis:
+        image: valkey/valkey:8-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "valkey-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+    env:
+      REDIS_ADDRESS: 127.0.0.1:6379
+
     steps:
       - uses: actions/checkout@v4
 
@@ -57,6 +97,25 @@ jobs:
       - name: test
         run: go test -race ./...
 
+      # The three tests in redis/ that need a server skip when nothing answers,
+      # which is what keeps `go test ./...` working on a laptop with no RESP
+      # server installed. Here the container is up and REDIS_ADDRESS points at
+      # it, so a skip means it never came up -- and a skip that looks like a
+      # pass is a green CI over a driver nothing ran.
+      #
+      # The whole package rather than one named test: the four refusals never
+      # skip, so any SKIP at all is the server missing, and a test added later
+      # is covered without anyone remembering to add it here.
+      - name: the tests actually ran against a server
+        if: matrix.module == 'redis'
+        run: |
+          go test -count=1 -v ./... | tee /tmp/redis-tests
+          if grep -q -- '--- SKIP:' /tmp/redis-tests; then
+            echo
+            echo "the tests skipped: no RESP server answered at $REDIS_ADDRESS"
+            exit 1
+          fi
+
       # go.mod has one require line and it stays that way (ADR 0052). The ws
       # subpackage exists so that the transport costs nothing in the graph, and
       # a websocket library, a Redis client or a router imported for one
@@ -64,7 +123,12 @@ jobs:
       #
       # arandu-io is this project, and golang.org/x is the standard library's
       # own annex. Anything else fails.
+      #
+      # The root module only. redis/ is a module of its own precisely so that a
+      # driver can live under it (ADR 0048), and running this there would fail
+      # the repository for doing the thing that module exists to do.
       - name: no third-party module reached the graph
+        if: matrix.module == '.'
         run: |
           outside=$(go list -deps -f '{{if .Module}}{{.Module.Path}}{{end}}' ./... \
                       | sort -u \
@@ -80,7 +144,11 @@ jobs:
       # file, so the absence of one is the cheap version of that check -- it
       # will not catch a careful paste, but it does catch the honest one, which
       # is the one that actually happens.
+      #
+      # ws/ is in the root module, which is the only place it can be checked
+      # from.
       - name: ws is still ours
+        if: matrix.module == '.'
         run: |
           borrowed=$(find ws \( -name 'LICENSE*' -o -name 'THIRD_PARTY*' \
                                 -o -name 'NOTICE*' \) || true)

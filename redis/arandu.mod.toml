@@ -1,0 +1,13 @@
+# What this adapter declares about itself.
+
+name = "arandu-io/joaju/redis"
+framework = ">= 0.26"
+profiles = ["conventional", "performance"]
+
+[permissions]
+# It opens a connection to a RESP server and carries the bus over its pub/sub,
+# which leaves the process.
+network = true
+filesystem = false
+exec = false
+migrations = false
