@@ -1,0 +1,107 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+
+    # No service container. Everything this repository does today it does in
+    # memory: the transport is its own, the bus the relay talks to is an
+    # interface, and the tests drive both through real sockets on a loopback
+    # listener. When the Redis relay lands, this is where its server goes.
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          # Not go-version-file: go.mod declares the MINIMUM language version
+          # ("go 1.26"), and setup-go installs exactly that -- 1.26.0, whose
+          # standard library carries vulnerabilities fixed in later patches.
+          # govulncheck below is right to fail on it.
+          #
+          # "stable" is the version people actually run, which is what CI should
+          # be testing against. The minimum in go.mod stays where it is.
+          go-version: stable
+
+      # A formatting difference is a failure, not a comment on a pull request.
+      - name: gofmt
+        # Not `gofmt -l .`: gofmt is the only tool in this chain that does not
+        # read build tags, so a *.kyse.go the compiler excludes would still be
+        # reported here. There is none in this repository and there should not
+        # be one -- the filter is the project's (RULE 5), kept identical across
+        # repositories so that the command a contributor copies is the command
+        # CI runs.
+        run: |
+          unformatted=$(find . -name '*.go' -not -path '*/testdata/*' \
+                          -not -name '*.kyse.go' -exec gofmt -l {} +)
+          if [ -n "$unformatted" ]; then
+            echo "not gofmt'd:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: vet
+        run: go vet ./...
+
+      # The race detector matters more here than anywhere else in the project: a
+      # connection is a goroutine, a channel is shared by every goroutine
+      # subscribed to it, and a broadcast walks the subscriber set while sockets
+      # are opening and closing underneath it.
+      - name: test
+        run: go test -race ./...
+
+      # go.mod has one require line and it stays that way (ADR 0052). The ws
+      # subpackage exists so that the transport costs nothing in the graph, and
+      # a websocket library, a Redis client or a router imported for one
+      # convenience would undo that quietly.
+      #
+      # arandu-io is this project, and golang.org/x is the standard library's
+      # own annex. Anything else fails.
+      - name: no third-party module reached the graph
+        run: |
+          outside=$(go list -deps -f '{{if .Module}}{{.Module.Path}}{{end}}' ./... \
+                      | sort -u \
+                      | grep -vE '^github\.com/arandu-io/|^golang\.org/x/' || true)
+          if [ -n "$outside" ]; then
+            echo "a third-party module reached the graph:"
+            echo "$outside"
+            exit 1
+          fi
+
+      # ws/ is this project's own RFC 6455, not a fork and not borrowed code
+      # (ADR 0052). Copied code arrives carrying its license or its attribution
+      # file, so the absence of one is the cheap version of that check -- it
+      # will not catch a careful paste, but it does catch the honest one, which
+      # is the one that actually happens.
+      - name: ws is still ours
+        run: |
+          borrowed=$(find ws \( -name 'LICENSE*' -o -name 'THIRD_PARTY*' \
+                                -o -name 'NOTICE*' \) || true)
+          if [ -n "$borrowed" ]; then
+            echo "ws/ carries an attribution file, so the code came from somewhere else:"
+            echo "$borrowed"
+            exit 1
+          fi
+
+      - name: no Node
+        run: |
+          found=$(find . -name package.json -o -name node_modules -o -name 'vite.config.*' | grep -v '^./.git' || true)
+          if [ -n "$found" ]; then
+            echo "Node entered the view layer:"
+            echo "$found"
+            exit 1
+          fi
+
+      # Required by doc 24: a known vulnerability blocks the merge rather than
+      # showing up in a report nobody reads.
+      - name: govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...

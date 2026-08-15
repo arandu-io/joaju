@@ -1,0 +1,13 @@
+# What this server declares about itself.
+
+name = "arandu-io/joaju"
+framework = ">= 0.26"
+profiles = ["conventional", "performance"]
+
+[permissions]
+# It holds sockets open and, once there is more than one instance, relays events
+# between them over a bus. Both leave the process.
+network = true
+filesystem = false
+exec = false
+migrations = false
