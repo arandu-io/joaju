@@ -285,8 +285,10 @@ func (p *pusher) Close(ctx context.Context, conn *Connection) {
 // channel, and it is asked about the [Member] the client offered as well -- a
 // policy that does not compare it against the subject is a policy that lets a
 // subscriber join a presence channel as somebody else, which is why
-// [Subscription] carries it. Only then is a channel reached, and
-// [channel.Subscribe] asks the Grant again before it seats anybody.
+// [Subscription] carries it. It is asked about the signature the client offered
+// for the same reason: evidence a policy is not shown is evidence it cannot
+// weigh. Only then is a channel reached, and [channel.Subscribe] asks the Grant
+// again before it seats anybody.
 //
 // The confirmation goes out last, and it carries [Channel.Data] -- which on a
 // presence channel is the member list, this subscriber included. That is why it
@@ -313,10 +315,16 @@ func (p *pusher) join(ctx context.Context, conn *Connection, f Frame) error {
 	if err != nil {
 		return err
 	}
+	// Nothing between the frame and here reads [SubscribeRequest.Auth] or
+	// interprets the channel_data it was computed over. Both are handed on as
+	// they arrived, because a policy checking a signature has to hash the bytes
+	// the client signed and not a rendering of them.
 	grant, err := auth.Authorize(ctx, p.subscribe, conn.Subject(), broadcasting.ChannelJoin, Subscription{
-		Channel: name,
-		Member:  member,
-		Socket:  conn.ID(),
+		Channel:     name,
+		Member:      member,
+		Socket:      conn.ID(),
+		Auth:        request.Auth,
+		ChannelData: request.ChannelData,
 	})
 	if err != nil {
 		return err

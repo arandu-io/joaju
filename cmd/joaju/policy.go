@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/hmac"
 	"fmt"
 
 	"github.com/arandu-io/hesape/auth"
@@ -72,34 +73,45 @@ func (p connectPolicy) Can(_ context.Context, s auth.Subject, a auth.Action, h j
 // API route that names one, because subscribing is a read and RULE 17 opens no
 // exception for reads.
 //
-// # What it can decide, and what it deliberately does not
+// # What it decides on
 //
 // A channel that [joaju.ChannelType.Guarded] answers no for -- public and
 // public cache -- needs no decision beyond the tenant, and the tenant is in
-// every name and came from a Grant. Those it allows.
+// every name and came from a Grant. Those it allows, whatever else the client
+// sent with them.
 //
 // A private or presence channel is a decision about a person, and this process
-// does not know any: it authenticates the application by its app secret and a
-// browser not at all, so the only honest answer it has is a refusal. In the
-// Pusher protocol the missing half arrives as the "auth" field of the subscribe
-// frame -- an HMAC the application computed over "socket_id:channel" with the
-// shared secret. This server does not read it, and that is a decision already
-// taken and written down in [joaju.SubscribeRequest.Auth]: a signature that
-// authorizes a channel without naming a tenant would be a second way to allow a
-// subscription, and [joaju.Subscription] therefore carries no field for it. A
-// policy cannot check evidence it is never shown.
+// knows none: it authenticates the application by its app secret and a browser
+// not at all. What it has instead is what the Pusher protocol puts in the
+// subscribe frame -- an HMAC the application computed over
+// "socket_id:channel", or "socket_id:channel:channel_data" on a presence
+// channel, with the same shared secret. It reaches this policy as
+// [joaju.Subscription.Auth], and this is what recomputes it.
 //
-// So the standalone process serves the public half of the protocol, and a
-// deployment that needs private and presence channels mounts [joaju.Server]
-// inside its application with a policy that knows its people. That is the same
-// division Reverb has and reaches by the opposite route: there the socket server
-// is separate and the application signs for it over HTTP; here the application
-// can hold the server, so it can decide directly.
+// That is not a second way to allow a subscription, which is what
+// [joaju.SubscribeRequest.Auth] rules out and still rules out for an
+// application that has a front door of its own. This process is the case with
+// no front door: nothing else in it identifies a browser, so there is no first
+// mechanism for this to compete with. And it stays evidence rather than
+// authority -- the signature allows nothing on its own, the tenant is the
+// process's and comes off the Grant either way (RULE 14), and this policy is
+// still what says yes.
+//
+// It is the same division Reverb reaches by the opposite route: there the socket
+// server is always separate and the application always signs for it over HTTP;
+// here an application that holds the server decides directly, and only a process
+// standing alone falls back to the signature.
 type subscriptionPolicy struct {
 	// tenant is the one this process serves, checked again here: a Grant issued
 	// for Connect is not a Grant to listen, and a subject that reached this
 	// policy by another path is still refused.
 	tenant string
+	// appKey is what the half of a signature in front of the colon has to be,
+	// and secret is what the half behind it has to be computed with. They are
+	// the same two values [frontDoor] verifies the HTTP API with, because the
+	// Pusher protocol has one shared secret and not two.
+	appKey string
+	secret []byte
 }
 
 // Can decides one subscription.
@@ -115,6 +127,10 @@ func (p subscriptionPolicy) Can(_ context.Context, s auth.Subject, a auth.Action
 	}
 
 	if !sub.Channel.Type().Guarded() {
+		// A signature on a public channel is not a mistake and is not checked.
+		// The clients send one where the application's endpoint answered for a
+		// channel it did not have to, and refusing it would refuse a
+		// subscription that needed no evidence in the first place.
 		return nil
 	}
 	if s.HasRole(roleApplication) {
@@ -125,7 +141,61 @@ func (p subscriptionPolicy) Can(_ context.Context, s auth.Subject, a auth.Action
 		return nil
 	}
 
-	return fmt.Errorf(
-		"a %s channel needs a decision about a person, and this process authenticates none: it accepts the application by its app secret and a browser as an anonymous reader. Serve %s by mounting joaju.Server inside the application, behind its own SubscriptionPolicy",
-		sub.Channel.Type(), sub.Channel.Requested())
+	return p.verify(sub)
+}
+
+// verify recomputes the signature the client offered for a guarded channel.
+//
+// The refusals are three, and the first two are not ceremony. A subscription
+// with no signature is the client that never asked its application, and saying
+// so is what tells a developer their auth endpoint is not wired rather than
+// that their secret is wrong. A subscription with no socket id is worse: the
+// socket id is the whole of what binds a signature to one connection, so
+// checking one without it would accept forever, from anybody, a signature
+// issued once for somebody.
+func (p subscriptionPolicy) verify(sub joaju.Subscription) error {
+	if sub.Auth == "" {
+		return fmt.Errorf(
+			"a %s channel needs the signature the application issues for it, and the subscription to %s carried none",
+			sub.Channel.Type(), sub.Channel.Requested())
+	}
+	if sub.Socket == "" {
+		return fmt.Errorf(
+			"the subscription to %s named no socket, and a signature not bound to one is a signature anybody who saw it can replay",
+			sub.Channel.Requested())
+	}
+
+	// The app key is in front of the colon, so a signature computed for another
+	// application is refused by the same comparison rather than by a separate
+	// one that would answer earlier and say more.
+	want := p.appKey + ":" + signature(p.secret, subscriptionSigningString(sub))
+	// hmac.Equal and not ==, for the reason [frontDoor.verify] gives: comparing
+	// a secret-derived value against one the caller chose is the comparison
+	// whose duration says how many leading characters were right.
+	if !hmac.Equal([]byte(want), []byte(sub.Auth)) {
+		return fmt.Errorf("the signature offered for %s is not the one this server computed", sub.Channel.Requested())
+	}
+
+	return nil
+}
+
+// subscriptionSigningString builds the string a Pusher subscription signature is
+// computed over: "<socket id>:<channel>", and with the presence data appended
+// where the client sent some.
+//
+// The channel is [joaju.ChannelName.Requested] and never its String: the client
+// signed the name it sent, and the tenant this process scoped it to is neither
+// something it knows nor something it was allowed to choose (RULE 14).
+//
+// The presence data is appended as it arrived and is not re-encoded. It is
+// already the exact bytes of the frame's channel_data -- see
+// [joaju.Subscription.ChannelData] -- and a re-encoding that reordered a key or
+// dropped a space would hash to something the application never signed.
+func subscriptionSigningString(sub joaju.Subscription) string {
+	signing := string(sub.Socket) + ":" + sub.Channel.Requested()
+	if len(sub.ChannelData) > 0 {
+		signing += ":" + string(sub.ChannelData)
+	}
+
+	return signing
 }

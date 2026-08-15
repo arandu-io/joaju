@@ -384,6 +384,59 @@ func TestPusherAsksThePolicyAboutAPublicChannelToo(t *testing.T) {
 	}
 }
 
+// The signature is evidence, so it has to arrive as evidence: verbatim, and
+// beside the bytes it was computed over. A policy handed a re-encoded
+// channel_data is a policy hashing something the application never signed.
+func TestPusherShowsThePolicyTheSignatureAndTheBytesItCovers(t *testing.T) {
+	f := newProtocolFixture(t, joaju.PusherConfig{})
+	conn, _ := f.open(t)
+
+	const (
+		offered     = "278d425bdf160c739803:58df8b0c36d6982b82c3ecf6b4662e34fe8c25bba48f5369f135bf843651c3a4"
+		channelData = `{"user_id":10,"user_info":{"name":"Mr. Pusher"}}`
+	)
+	protocolSend(t, conn, `{"event":"pusher:subscribe","data":{"channel":"presence-room.1","auth":"`+offered+
+		`","channel_data":"{\"user_id\":10,\"user_info\":{\"name\":\"Mr. Pusher\"}}"}}`)
+
+	if confirmation := protocolNext(t, conn); confirmation.Event != joaju.EventSubscriptionSucceeded {
+		t.Fatalf("subscribing answered %s (%s)", confirmation.Event, confirmation.Data)
+	}
+
+	asked := f.policy.seen()
+	if len(asked) != 1 {
+		t.Fatalf("the policy was asked %d times, want once", len(asked))
+	}
+	if asked[0].Auth != offered {
+		t.Errorf("the policy was shown the signature %q, want %q -- nothing on the way may touch it", asked[0].Auth, offered)
+	}
+	if string(asked[0].ChannelData) != channelData {
+		t.Errorf("the policy was shown the channel_data %s, want %s byte for byte", asked[0].ChannelData, channelData)
+	}
+	// And it is still shown the claim read out of those bytes, because that is
+	// the part it compares against the subject.
+	if asked[0].Member.UserID != "10" {
+		t.Errorf("the policy was shown the member %+v, want the one the client claimed to be", asked[0].Member)
+	}
+}
+
+// A public channel is asked about with whatever the client sent, and a client
+// that sends no signature is asked about with none: an empty field is what a
+// policy reads as "this browser offered nothing".
+func TestPusherShowsThePolicyNoSignatureWhenTheClientSentNone(t *testing.T) {
+	f := newProtocolFixture(t, joaju.PusherConfig{})
+	conn, _ := f.open(t)
+
+	protocolSubscribe(t, conn, "orders.17")
+
+	asked := f.policy.seen()
+	if len(asked) != 1 {
+		t.Fatalf("the policy was asked %d times, want once", len(asked))
+	}
+	if asked[0].Auth != "" || asked[0].ChannelData != nil {
+		t.Fatalf("the policy was shown %+v, want a subscription that offered nothing", asked[0])
+	}
+}
+
 func TestPusherRefusesASubscriptionThePolicyRefusesAndKeepsTheSocket(t *testing.T) {
 	f := newProtocolFixture(t, joaju.PusherConfig{})
 	f.policy.deny = func(s joaju.Subscription) error {

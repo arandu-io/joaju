@@ -23,11 +23,13 @@
 // auth.Guest, and the tenant of both is the process's configuration and never
 // the request's (RULE 14).
 //
-// The consequence is stated where it is decided, in [subscriptionPolicy]: this
-// process serves public channels to browsers and refuses private and presence
-// ones, because the evidence that would settle those -- the "auth" signature of
-// the subscribe frame -- is evidence [joaju.Subscription] deliberately does not
-// carry.
+// The consequence is stated where it is decided, in [subscriptionPolicy]: a
+// browser reaches a public channel because the tenant is the whole question
+// there, and reaches a private or presence one by offering the signature the
+// Pusher protocol has its application issue -- which arrives as
+// [joaju.Subscription.Auth] and is recomputed here. The signature decides
+// nothing on its own; the policy does, and the tenant still comes off the Grant
+// (RULE 14).
 //
 // # What terminates TLS
 //
@@ -149,7 +151,11 @@ func run() error {
 // decide who may connect.
 func newServer(cfg config, log *slog.Logger) (*joaju.Server, error) {
 	broker := joaju.NewMemoryBroker()
-	subscribe := subscriptionPolicy{tenant: cfg.Tenant}
+	subscribe := subscriptionPolicy{
+		tenant: cfg.Tenant,
+		appKey: cfg.AppKey,
+		secret: []byte(cfg.AppSecret),
+	}
 
 	return joaju.NewServer(joaju.ServerConfig{
 		AppID:  cfg.AppID,

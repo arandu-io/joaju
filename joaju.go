@@ -519,6 +519,39 @@ type Subscription struct {
 	Member Member
 	// Socket is which of the subject's connections is asking.
 	Socket SocketID
+	// Auth is the Pusher subscription signature the client offered --
+	// "<app key>:<hex HMAC-SHA256>" -- verbatim, or empty when it offered none.
+	//
+	// It is evidence and not authority, which is the whole of why it may be
+	// here. Nothing in this package reads it, nothing derives a tenant from it,
+	// and holding it allows no channel: the decision is still the
+	// [SubscriptionPolicy]'s and the Grant it issues is still the only way to a
+	// [Channel]. It is carried for the reason [Handshake.Origin] is carried --
+	// a policy cannot weigh evidence it is never shown, and this is the evidence
+	// the Pusher protocol puts on the wire about a browser.
+	//
+	// A policy that checks it recomputes the HMAC of
+	// "<socket id>:<channel>:<channel data>" -- the last part only where there
+	// is one -- under the app secret and compares in constant time. The channel
+	// in that string is [ChannelName.Requested] and never [ChannelName.String]:
+	// the client signed the name it sent, and the tenant was never its to see.
+	// The socket id is what makes the signature one connection's; a policy that
+	// leaves it out accepts a signature anybody who saw it can replay.
+	//
+	// A policy for a mounted application ignores it, and should. There the
+	// subject on the Grant arrived through the framework's front door, so a
+	// signature that could also allow a subscription would be the second
+	// mechanism RULE 9 forbids. Where there is no front door -- cmd/joaju is
+	// that process -- there is no first mechanism for it to be a second one to.
+	Auth string
+	// ChannelData is the presence data exactly as it arrived, and it is what
+	// the third part of the signed string above is.
+	//
+	// It is [Subscription.Member] before it was read: the same bytes, undecoded.
+	// Both are here because a policy compares fields and a signature covers
+	// bytes -- re-encoding Member would produce a different JSON text, and so a
+	// different hash, for the same claim.
+	ChannelData json.RawMessage
 }
 
 // ConnectPolicy decides whether a client may open a socket. Its Grant is issued

@@ -464,25 +464,36 @@ type SubscribeRequest struct {
 	// [NewChannelName], which is where the tenant comes from the Grant.
 	Channel string `json:"channel"`
 
-	// Auth is the client's Pusher authentication signature, and this server
-	// does not verify it.
+	// Auth is the client's Pusher authentication signature, and this package
+	// does not verify it. It is carried to [Subscription.Auth], where a
+	// [SubscriptionPolicy] may.
 	//
 	// In Pusher, and so in Reverb, this string is the whole authorization: the
 	// application signs "socket_id:channel" with the shared secret over a
-	// separate HTTP round trip, and the socket server checks the HMAC. Here the
-	// decision is a [SubscriptionPolicy] that issues an auth.Grant, and a
-	// second mechanism that could also allow a subscription is exactly what
-	// RULE 9 forbids -- particularly this one, which authorizes a channel
-	// without ever naming a tenant.
+	// separate HTTP round trip, and the socket server checks the HMAC. That is
+	// what nothing here does, and the reason still stands where it was written.
+	// In a mounted application the subject on the Grant came through the
+	// framework's front door, and a signature that could also allow a
+	// subscription would be exactly the second mechanism RULE 9 forbids --
+	// particularly this one, which allows a channel without ever naming a
+	// tenant.
 	//
-	// It is decoded rather than dropped so that the wire shape is not lossy and
-	// so that this comment has somewhere to live. Nothing downstream reads it,
-	// and [Subscription] deliberately has no field for it.
+	// What is different is who is asked. The signature travels as evidence
+	// rather than as authority: it allows nothing by itself, it builds no
+	// tenant and no Grant, and a policy that ignores it refuses precisely what
+	// it refused before. In a process that authenticates nobody there is no
+	// first mechanism for it to be a second one to, and there it is the only
+	// evidence about a browser there is -- which is why cmd/joaju could serve
+	// no private or presence channel while [Subscription] had no field for it.
 	Auth string `json:"auth,omitempty"`
 
 	// ChannelData is the presence information the client offered, and it is a
 	// claim rather than a fact -- see [Subscription.Member]. Read it with
 	// [SubscribeRequest.Member].
+	//
+	// It reaches a policy undecoded as well, as [Subscription.ChannelData],
+	// because it is the third part of what [SubscribeRequest.Auth] was computed
+	// over and re-encoding it would change the bytes and so the hash.
 	ChannelData json.RawMessage `json:"channel_data,omitempty"`
 }
 
