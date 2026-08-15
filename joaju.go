@@ -103,6 +103,18 @@ var ErrNoGrant = fmt.Errorf("%w: joaju: no grant", auth.ErrForbidden)
 // Grant. It can happen when a name built under one Grant is used with another,
 // which is the mistake worth a distinct error: both values are valid, and
 // nothing but this comparison notices.
+// ErrConnectionLimit is the tenant already holding as many sockets as
+// [ServerConfig.MaxConnections] allows.
+//
+// It is refused AFTER the upgrade, not before, and that is on purpose: the
+// client is a websocket by then, so it can be told why in a protocol frame it
+// understands instead of getting an HTTP status it has no handler for. Reverb
+// answers the same way, with ConnectionLimitExceeded.
+//
+// It is not an auth.ErrForbidden. Nothing was refused on authority -- the same
+// client with the same Grant is admitted the moment somebody disconnects.
+var ErrConnectionLimit = errors.New("joaju: this tenant is holding as many connections as it may")
+
 var ErrWrongTenant = fmt.Errorf("%w: joaju: the grant and the channel belong to different tenants", auth.ErrForbidden)
 
 // SocketID identifies one open socket, and is the id the protocol calls

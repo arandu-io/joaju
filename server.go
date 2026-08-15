@@ -38,6 +38,15 @@ const (
 	// DefaultOutboundQueue is how many frames may be waiting on one socket
 	// before the client is judged to have fallen behind.
 	DefaultOutboundQueue = 64
+	// DefaultMaxConnections is how many sockets one tenant may hold open.
+	//
+	// Zero in [ServerConfig] means this, and this is not "no limit": a server
+	// that accepts sockets until the file descriptors run out stops answering
+	// for EVERY tenant, and the one that exhausted them is not necessarily the
+	// one that notices. Reverb calls the refusal ConnectionLimitExceeded and
+	// leaves the number to configuration; the number here is a default that a
+	// deployment raises knowingly.
+	DefaultMaxConnections = 10_000
 	// DefaultWriteTimeout is how long one frame may take to reach the client.
 	DefaultWriteTimeout = 10 * time.Second
 	// DefaultPingInterval is how often the server sends a WebSocket ping.
@@ -130,10 +139,23 @@ type ServerConfig struct {
 	// same name.
 	MaxMessageSize int64
 	MaxBodySize    int64
-	OutboundQueue  int
-	WriteTimeout   time.Duration
-	PingInterval   time.Duration
-	PongTimeout    time.Duration
+
+	// MaxConnections is how many sockets ONE TENANT may hold. Zero means
+	// [DefaultMaxConnections]; a negative number means no limit, and saying so
+	// takes writing -1 rather than leaving a field out.
+	//
+	// Per tenant and not per server, for the reason RULE 14 gives: a global
+	// limit lets one customer's traffic refuse another customer's connections,
+	// which is a denial of service one of them did not cause and cannot see.
+	MaxConnections int
+
+	// Observer is told what happened, after it happened. Nil means
+	// [NopObserver]. See [Observer] for why nothing there can refuse anything.
+	Observer      Observer
+	OutboundQueue int
+	WriteTimeout  time.Duration
+	PingInterval  time.Duration
+	PongTimeout   time.Duration
 }
 
 // Server answers the nine routes: the socket and the eight of the HTTP API.
@@ -191,9 +213,18 @@ type Server struct {
 	writeTimeout   time.Duration
 	pingInterval   time.Duration
 	pongTimeout    time.Duration
+	maxConnections int
+
+	// observer is never nil. See [NopObserver] for why.
+	observer Observer
 
 	mu    sync.RWMutex
 	conns map[SocketID]*Connection
+	// perTenant is how many sockets each tenant holds, and it is what the
+	// limit is checked against. Kept beside conns rather than counted from it
+	// because counting a map of ten thousand on every upgrade is work that
+	// grows with the thing it is protecting.
+	perTenant map[string]int
 }
 
 // NewServer builds the server, or says which part of the config was missing.
@@ -227,7 +258,16 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		writeTimeout:   cfg.WriteTimeout,
 		pingInterval:   cfg.PingInterval,
 		pongTimeout:    cfg.PongTimeout,
+		maxConnections: cfg.MaxConnections,
+		observer:       cfg.Observer,
 		conns:          make(map[SocketID]*Connection),
+		perTenant:      make(map[string]int),
+	}
+	if s.observer == nil {
+		s.observer = NopObserver{}
+	}
+	if s.maxConnections == 0 {
+		s.maxConnections = DefaultMaxConnections
 	}
 	if s.log == nil {
 		s.log = slog.Default()
@@ -443,9 +483,17 @@ func (s *Server) read(r *http.Request, conn *Connection, socket *websocket.Conn)
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 
-	s.register(conn)
+	if err := s.register(conn); err != nil {
+		s.log.WarnContext(ctx, "joaju: the connection was refused by the tenant's limit",
+			slog.String("socket", string(conn.ID())), slog.String("tenant", conn.Tenant()))
+		s.observer.ConnectionClosed(ctx, conn.ID(), conn.Tenant(), ReasonLimit)
+		_ = conn.Terminate(context.WithoutCancel(ctx))
+		return
+	}
+	s.observer.ConnectionOpened(ctx, conn.ID(), conn.Tenant())
 	defer func() {
 		s.unregister(conn)
+		s.observer.ConnectionClosed(ctx, conn.ID(), conn.Tenant(), ReasonClient)
 		s.protocol.Close(ctx, conn)
 		_ = conn.Terminate(context.WithoutCancel(ctx))
 	}()
@@ -486,16 +534,46 @@ func (s *Server) read(r *http.Request, conn *Connection, socket *websocket.Conn)
 	}
 }
 
-func (s *Server) register(conn *Connection) {
+// register admits the connection, or refuses it because the tenant is full.
+//
+// The check and the insert are one critical section on purpose. Checking under
+// a read lock and inserting under a write lock lets two upgrades that both saw
+// room take the last slot, and a limit that admits N+1 under load is a limit
+// that fails exactly when it is needed.
+func (s *Server) register(conn *Connection) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	tenant := conn.Tenant()
+	if s.maxConnections > 0 && s.perTenant[tenant] >= s.maxConnections {
+		return ErrConnectionLimit
+	}
+
 	s.conns[conn.ID()] = conn
+	s.perTenant[tenant]++
+	return nil
 }
 
 func (s *Server) unregister(conn *Connection) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	if _, held := s.conns[conn.ID()]; !held {
+		// Never registered -- refused by the limit, and its slot was never
+		// taken. Decrementing here would let a refused connection lower the
+		// count for the ones that were admitted.
+		return
+	}
 	delete(s.conns, conn.ID())
+
+	tenant := conn.Tenant()
+	if s.perTenant[tenant] <= 1 {
+		// The map entry goes when the last one does, so a tenant that connected
+		// once and left costs nothing for the life of the process.
+		delete(s.perTenant, tenant)
+		return
+	}
+	s.perTenant[tenant]--
 }
 
 // publishRequest is the body of POST /apps/{appId}/events, and one element of
