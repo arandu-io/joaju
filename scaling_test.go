@@ -6,6 +6,9 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -51,6 +54,9 @@ func relayTestName(t *testing.T, tenant, requested string) ChannelName {
 // relayTestChannel is a [Channel] that records what it was asked to deliver.
 type relayTestChannel struct {
 	name ChannelName
+	// subscribers are who is on it, which is what the metrics routes read. A
+	// channel that only has to receive leaves it empty.
+	subscribers []Subscriber
 
 	mu       sync.Mutex
 	received []Event
@@ -58,7 +64,7 @@ type relayTestChannel struct {
 }
 
 func (c *relayTestChannel) Name() ChannelName                { return c.name }
-func (c *relayTestChannel) Connections() []Subscriber        { return nil }
+func (c *relayTestChannel) Connections() []Subscriber        { return c.subscribers }
 func (c *relayTestChannel) Find(SocketID) (Subscriber, bool) { return Subscriber{}, false }
 func (c *relayTestChannel) Subscribed(*Connection) bool      { return false }
 func (c *relayTestChannel) Data() map[string]any             { return nil }
@@ -685,5 +691,561 @@ func TestRelayRefusesAnEventItCannotAddress(t *testing.T) {
 	}
 	if err := relay.Leave(ChannelName{}); err == nil {
 		t.Fatal("the zero channel name was left")
+	}
+}
+
+// The application every server in this file is. One server is one application
+// (ADR 0052), so these are values and not a lookup.
+const (
+	fleetTestAppID  = "app-1"
+	fleetTestAppKey = "key-1"
+)
+
+// The fixture below is a second one, and server_test.go's is the first. It is
+// not a duplicate by choice: that file is the package's EXTERNAL test binary
+// and this one is the internal binary, so nothing there can see the in-memory
+// [Bus] declared here -- and a bus, which has to stand in for Redis pub/sub for
+// two instances at once, is much the harder of the two to be asked to write
+// twice. So the bus stays and the smaller half is restated: a Broker over a
+// map, a Protocol that does nothing, and the middleware every route needs.
+
+// fleetTestBroker is a [Broker] over a map, filtered by the Grant's tenant --
+// which is the whole reason [Broker.All] takes one.
+type fleetTestBroker struct {
+	mu       sync.Mutex
+	channels map[string]Channel
+}
+
+func newFleetTestBroker(channels ...*relayTestChannel) *fleetTestBroker {
+	b := &fleetTestBroker{channels: make(map[string]Channel, len(channels))}
+	for _, one := range channels {
+		b.channels[one.name.String()] = one
+	}
+
+	return b
+}
+
+func (b *fleetTestBroker) Find(_ context.Context, g auth.Grant, name ChannelName) (Channel, error) {
+	if auth.Tenant(g) != name.Tenant() {
+		return nil, ErrWrongTenant
+	}
+
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	held, ok := b.channels[name.String()]
+	if !ok {
+		return nil, ErrNoChannel
+	}
+
+	return held, nil
+}
+
+func (b *fleetTestBroker) FindOrCreate(ctx context.Context, g auth.Grant, name ChannelName) (Channel, error) {
+	return b.Find(ctx, g, name)
+}
+
+func (b *fleetTestBroker) Remove(_ context.Context, _ auth.Grant, name ChannelName) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	delete(b.channels, name.String())
+
+	return nil
+}
+
+func (b *fleetTestBroker) All(_ context.Context, g auth.Grant) ([]Channel, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	all := make([]Channel, 0, len(b.channels))
+	for _, held := range b.channels {
+		if held.Name().Tenant() == auth.Tenant(g) {
+			all = append(all, held)
+		}
+	}
+
+	return all, nil
+}
+
+// fleetTestProtocol is a [Protocol] that does nothing. No metrics route reaches
+// one, and [NewServer] will not build a server without one.
+type fleetTestProtocol struct{}
+
+func (fleetTestProtocol) Open(context.Context, *Connection) error            { return nil }
+func (fleetTestProtocol) Message(context.Context, *Connection, []byte) error { return nil }
+func (fleetTestProtocol) Close(context.Context, *Connection)                 {}
+
+// fleetTestInstance is one joaju process: a relay on the shared bus, and the
+// server attached to it.
+type fleetTestInstance struct {
+	server *Server
+	relay  *Relay
+	log    *relayTestLog
+}
+
+// newFleetTestInstance starts one instance holding the given channels.
+//
+// bus may be nil, and an instance built that way is the degraded one: it has no
+// fleet to ask and answers its metrics routes out of its own state.
+func newFleetTestInstance(t *testing.T, id InstanceID, bus Bus, wait time.Duration, channels ...*relayTestChannel) *fleetTestInstance {
+	t.Helper()
+
+	log := &relayTestLog{}
+	relay, err := NewRelay(context.Background(), id, bus, log.logger())
+	if err != nil {
+		t.Fatalf("building the relay of %s: %v", id, err)
+	}
+	t.Cleanup(func() { _ = relay.Close() })
+
+	server, err := NewServer(ServerConfig{
+		AppID:          fleetTestAppID,
+		AppKey:         fleetTestAppKey,
+		Broker:         newFleetTestBroker(channels...),
+		Connect:        channelTestConnectPolicy{},
+		Subscribe:      relayTestPolicy{},
+		Protocol:       fleetTestProtocol{},
+		Log:            log.logger(),
+		Relay:          relay,
+		MetricsTimeout: wait,
+	})
+	if err != nil {
+		t.Fatalf("building the server of %s: %v", id, err)
+	}
+	t.Cleanup(func() { server.Close(context.Background()) })
+
+	// A channel is part of the fleet because it was joined into it, and
+	// [Relay.Join] is the only way in: it takes the Grant that authorized the
+	// subscription, and refuses one issued for another tenant.
+	for _, one := range channels {
+		if err := relay.Join(relayTestGrant(t, one.name.Tenant(), broadcasting.ChannelJoin), one); err != nil {
+			t.Fatalf("joining %s on %s: %v", one.name, id, err)
+		}
+	}
+
+	return &fleetTestInstance{server: server, relay: relay, log: log}
+}
+
+// hold registers one socket of user, which is what the socket route does once
+// the handshake is authorized.
+func (i *fleetTestInstance) hold(t *testing.T, tenant, user string) {
+	t.Helper()
+
+	if err := i.server.register(connFor(t, tenant, user)); err != nil {
+		t.Fatalf("registering the socket of %s of %s: %v", user, tenant, err)
+	}
+}
+
+// get calls one metrics route as a subject of the tenant, in place of hesape's
+// Authenticate middleware -- which is the only thing anywhere that puts an
+// auth.Subject on a request.
+func (i *fleetTestInstance) get(t *testing.T, tenant, path string) (int, string) {
+	t.Helper()
+
+	request := httptest.NewRequest(http.MethodGet, path, nil)
+	request = request.WithContext(auth.WithSubject(request.Context(), auth.Subject{ID: "reader", Tenant: tenant}))
+
+	answer := httptest.NewRecorder()
+	i.server.ServeHTTP(answer, request)
+
+	return answer.Code, strings.TrimSpace(answer.Body.String())
+}
+
+// route is one of the four, for the application this file's servers are.
+func fleetTestRoute(path string) string { return "/apps/" + fleetTestAppID + path }
+
+// fleetTestListening waits until the whole fleet is subscribed.
+//
+// Until then Bus.Publish counts fewer subscribers than there are instances, and
+// a question that nobody has subscribed to yet is one nobody answers. It is not
+// a race the server has -- it is this test starting instances and asking them
+// something in the same breath.
+func fleetTestListening(t *testing.T, bus *relayTestBus, asker InstanceID, instances int) {
+	t.Helper()
+
+	waitFor(t, "the fleet to be listening for questions", func() bool {
+		return bus.listeners(MetricsTopic) == instances
+	})
+	waitFor(t, "the asking instance to be listening for answers", func() bool {
+		return bus.listeners(MetricsReplyTopic(asker)) == 1
+	})
+}
+
+// fleetTestChannelBody is what the three channel routes answer with.
+type fleetTestChannelBody struct {
+	Occupied          bool `json:"occupied"`
+	SubscriptionCount int  `json:"subscription_count"`
+	UserCount         int  `json:"user_count"`
+}
+
+func fleetTestDecode(t *testing.T, body string, into any) {
+	t.Helper()
+
+	if err := json.Unmarshal([]byte(body), into); err != nil {
+		t.Fatalf("decoding %s = %v", body, err)
+	}
+}
+
+func TestTheMetricsRoutesCountTheWholeFleetAndNotOneProcess(t *testing.T) {
+	t.Parallel()
+
+	bus := newRelayTestBus()
+	orders := relayTestName(t, "acme", "presence-orders.17")
+	invoices := relayTestName(t, "acme", "invoices.9")
+
+	// Bruno has a tab on each instance. He is two subscriptions and one member,
+	// which is the difference between the two sums these routes do.
+	here := &relayTestChannel{name: orders, subscribers: []Subscriber{
+		{Member: Member{UserID: "ana"}},
+		{Member: Member{UserID: "bruno"}},
+	}}
+	there := &relayTestChannel{name: orders, subscribers: []Subscriber{
+		{Member: Member{UserID: "bruno"}},
+		{Member: Member{UserID: "carla"}},
+		{Member: Member{UserID: "carla"}},
+	}}
+	// A channel not one socket of the first instance is on. Left out of the
+	// list, it would tell a customer they are talking on fewer channels than
+	// they are.
+	elsewhere := &relayTestChannel{name: invoices, subscribers: []Subscriber{
+		{Member: Member{UserID: "ana"}},
+	}}
+
+	first := newFleetTestInstance(t, "instance-one", bus, time.Second, here)
+	second := newFleetTestInstance(t, "instance-two", bus, time.Second, there, elsewhere)
+
+	first.hold(t, "acme", "ana")
+	first.hold(t, "acme", "bruno")
+	second.hold(t, "acme", "bruno-second-tab")
+	second.hold(t, "acme", "carla")
+	second.hold(t, "acme", "dora")
+
+	fleetTestListening(t, bus, "instance-one", 2)
+
+	status, body := first.get(t, "acme", fleetTestRoute("/connections"))
+	if status != http.StatusOK {
+		t.Fatalf("counting the fleet's sockets answered %d, want %d: %s", status, http.StatusOK, body)
+	}
+	if body != `{"connections":5}` {
+		t.Fatalf("the fleet's sockets counted %s, want two here and three on the other instance", body)
+	}
+
+	status, body = first.get(t, "acme", fleetTestRoute("/channels/presence-orders.17"))
+	if status != http.StatusOK {
+		t.Fatalf("asking about one channel answered %d, want %d: %s", status, http.StatusOK, body)
+	}
+
+	var one fleetTestChannelBody
+	fleetTestDecode(t, body, &one)
+	if !one.Occupied || one.SubscriptionCount != 5 {
+		t.Fatalf("the channel answered %+v, want the two subscriptions here and the three there", one)
+	}
+	if one.UserCount != 3 {
+		t.Fatalf("the channel answered %d members, want ana, bruno and carla -- bruno holds a socket on each instance and is one person", one.UserCount)
+	}
+
+	status, body = first.get(t, "acme", fleetTestRoute("/channels/presence-orders.17/users"))
+	if status != http.StatusOK {
+		t.Fatalf("asking for the members answered %d, want %d: %s", status, http.StatusOK, body)
+	}
+
+	var members struct {
+		Users []struct {
+			ID string `json:"id"`
+		} `json:"users"`
+	}
+	fleetTestDecode(t, body, &members)
+
+	named := make([]string, 0, len(members.Users))
+	for _, user := range members.Users {
+		named = append(named, user.ID)
+	}
+	if len(named) != 3 {
+		t.Fatalf("the members were %v, want the three people behind the five sockets", named)
+	}
+	for _, want := range []string{"ana", "bruno", "carla"} {
+		if !slices.Contains(named, want) {
+			t.Fatalf("the members were %v, want %s among them", named, want)
+		}
+	}
+
+	status, body = first.get(t, "acme", fleetTestRoute("/channels"))
+	if status != http.StatusOK {
+		t.Fatalf("listing the channels answered %d, want %d: %s", status, http.StatusOK, body)
+	}
+	if strings.Contains(body, "acme:") {
+		t.Fatalf("the channel list carried the tenant: %s", body)
+	}
+
+	var listed struct {
+		Channels map[string]fleetTestChannelBody `json:"channels"`
+	}
+	fleetTestDecode(t, body, &listed)
+
+	if got := listed.Channels["presence-orders.17"]; !got.Occupied || got.UserCount != 3 {
+		t.Fatalf("the list says %+v about presence-orders.17, want it occupied with three members", got)
+	}
+	held, listedElsewhere := listed.Channels["invoices.9"]
+	if !listedElsewhere {
+		t.Fatalf("the list is %v, want the channel only the other instance holds in it", listed.Channels)
+	}
+	if !held.Occupied {
+		t.Fatalf("the list says %+v about invoices.9, want it occupied: somebody is on it, just not here", held)
+	}
+}
+
+func TestAMetricsRouteAnswersWithoutTheInstanceThatWentQuiet(t *testing.T) {
+	t.Parallel()
+
+	bus := newRelayTestBus()
+	orders := relayTestName(t, "acme", "orders.17")
+
+	here := &relayTestChannel{name: orders, subscribers: []Subscriber{{Member: Member{UserID: "ana"}}}}
+	there := &relayTestChannel{name: orders, subscribers: []Subscriber{{Member: Member{UserID: "bruno"}}}}
+
+	wait := 50 * time.Millisecond
+	first := newFleetTestInstance(t, "instance-one", bus, wait, here)
+	newFleetTestInstance(t, "instance-two", bus, wait, there)
+
+	// A third subscriber that takes the question and never answers: an instance
+	// being replaced, one behind a partition, one too busy to read its socket.
+	// It is the failure a fleet actually has, and the route may not wait for it.
+	quiet, hangUp := context.WithCancel(context.Background())
+	defer hangUp()
+
+	go func() { _ = bus.Subscribe(quiet, []string{MetricsTopic}, func(string, string) {}) }()
+
+	fleetTestListening(t, bus, "instance-one", 3)
+
+	started := time.Now()
+	status, body := first.get(t, "acme", fleetTestRoute("/channels/orders.17"))
+	took := time.Since(started)
+
+	if status != http.StatusOK {
+		t.Fatalf("asking about one channel answered %d, want %d: %s", status, http.StatusOK, body)
+	}
+
+	var one fleetTestChannelBody
+	fleetTestDecode(t, body, &one)
+	if one.SubscriptionCount != 2 {
+		t.Fatalf("the channel answered %+v, want this instance's subscription and the one instance that answered", one)
+	}
+	if took < wait {
+		t.Fatalf("the route answered in %s, which is less than the %s it should have waited for the quiet instance", took, wait)
+	}
+	if took > 5*time.Second {
+		t.Fatalf("the route took %s to answer, and an instance that stopped answering held it open", took)
+	}
+}
+
+func TestAFleetAnswerNeverCrossesATenant(t *testing.T) {
+	t.Parallel()
+
+	bus := newRelayTestBus()
+
+	// The same requested name under two customers, which is the case the tenant
+	// is in every topic for: on the wire the client sees one name, and these two
+	// channels must never meet.
+	mine := relayTestName(t, "acme", "presence-orders.17")
+	theirs := relayTestName(t, "globex", "presence-orders.17")
+
+	here := &relayTestChannel{name: mine, subscribers: []Subscriber{{Member: Member{UserID: "ana"}}}}
+	there := &relayTestChannel{name: theirs, subscribers: []Subscriber{
+		{Member: Member{UserID: "gina"}},
+		{Member: Member{UserID: "hugo"}},
+	}}
+
+	first := newFleetTestInstance(t, "instance-one", bus, time.Second, here)
+	second := newFleetTestInstance(t, "instance-two", bus, time.Second, there)
+
+	first.hold(t, "acme", "ana")
+	second.hold(t, "globex", "gina")
+	second.hold(t, "globex", "hugo")
+	second.hold(t, "globex", "iris")
+
+	fleetTestListening(t, bus, "instance-one", 2)
+
+	status, body := first.get(t, "acme", fleetTestRoute("/connections"))
+	if status != http.StatusOK {
+		t.Fatalf("counting sockets answered %d, want %d: %s", status, http.StatusOK, body)
+	}
+	if body != `{"connections":1}` {
+		t.Fatalf("acme was told %s sockets are open, want its own one: a sum that crosses a tenant is a leak with a number on it", body)
+	}
+
+	status, body = first.get(t, "acme", fleetTestRoute("/channels/presence-orders.17"))
+	if status != http.StatusOK {
+		t.Fatalf("asking about one channel answered %d, want %d: %s", status, http.StatusOK, body)
+	}
+
+	var one fleetTestChannelBody
+	fleetTestDecode(t, body, &one)
+	if one.SubscriptionCount != 1 || one.UserCount != 1 {
+		t.Fatalf("acme's channel answered %+v, want the one subscription and the one member acme has", one)
+	}
+
+	status, body = first.get(t, "acme", fleetTestRoute("/channels/presence-orders.17/users"))
+	if status != http.StatusOK {
+		t.Fatalf("asking for the members answered %d, want %d: %s", status, http.StatusOK, body)
+	}
+	if strings.Contains(body, "gina") || strings.Contains(body, "hugo") {
+		t.Fatalf("acme was handed globex's member list: %s", body)
+	}
+	if !strings.Contains(body, "ana") {
+		t.Fatalf("acme's own member is missing from %s", body)
+	}
+}
+
+func TestADegradedInstanceAnswersItsMetricsRoutesFromItsOwnState(t *testing.T) {
+	t.Parallel()
+
+	orders := relayTestName(t, "acme", "orders.17")
+	channel := &relayTestChannel{name: orders, subscribers: []Subscriber{{Member: Member{UserID: "ana"}}}}
+
+	// No bus is the degradation that cannot recover, and an instance whose
+	// Redis is down is in the same state: [Relay.Degraded] is one flag and
+	// there is no third answer (RULE 9).
+	//
+	// The timeout is an hour. If a degraded instance asked the fleet and waited
+	// for it, this test would not finish.
+	alone := newFleetTestInstance(t, "instance-alone", nil, time.Hour, channel)
+	alone.hold(t, "acme", "ana")
+
+	if !alone.relay.Degraded() {
+		t.Fatal("an instance with no bus does not report that it is alone")
+	}
+
+	started := time.Now()
+
+	status, body := alone.get(t, "acme", fleetTestRoute("/channels/orders.17"))
+	if status != http.StatusOK {
+		t.Fatalf("asking about one channel answered %d, want %d: %s", status, http.StatusOK, body)
+	}
+
+	var one fleetTestChannelBody
+	fleetTestDecode(t, body, &one)
+	if one.SubscriptionCount != 1 {
+		t.Fatalf("the channel answered %+v, want the one subscription this instance holds", one)
+	}
+
+	status, body = alone.get(t, "acme", fleetTestRoute("/connections"))
+	if status != http.StatusOK {
+		t.Fatalf("counting sockets answered %d, want %d: %s", status, http.StatusOK, body)
+	}
+	if body != `{"connections":1}` {
+		t.Fatalf("a degraded instance counted %s, want the one socket it holds", body)
+	}
+
+	if took := time.Since(started); took > 10*time.Second {
+		t.Fatalf("a degraded instance spent %s on two metrics routes, and it has nothing to wait for", took)
+	}
+}
+
+func TestAFleetAnswerAboutAnotherTenantIsRefusedByTheInstanceThatAsked(t *testing.T) {
+	t.Parallel()
+
+	// The instance that answers filters by the tenant it was asked about, and
+	// the instance that asked refuses anything that came back about a different
+	// one. Only the second of those two is testable from here, because a
+	// well-behaved instance never sends the answer that would trip it -- and
+	// that is the point of having it: an instance answering about a tenant
+	// nobody asked about is either broken or is not an instance.
+	log := &relayTestLog{}
+	relay, err := NewRelay(context.Background(), "instance-one", newRelayTestBus(), log.logger())
+	if err != nil {
+		t.Fatalf("building the relay: %v", err)
+	}
+	defer func() { _ = relay.Close() }()
+
+	var tally fleetTally
+
+	tally.add(relay.log, relay.ID(), "acme", fleetAnswer{
+		Origin:      "instance-two",
+		Request:     "instance-one.whatever",
+		Tenant:      "globex",
+		Connections: 9,
+		Channels: map[string]channelAnswer{
+			"presence-orders.17": {Subscriptions: 9, Users: []string{"gina"}},
+		},
+	})
+
+	if tally.connections != 0 || len(tally.channels) != 0 {
+		t.Fatalf("an answer about globex was added to acme's numbers: %+v", tally)
+	}
+	if written := log.String(); !strings.Contains(written, "another tenant") {
+		t.Fatalf("the refusal was not written to the log:\n%s", written)
+	}
+
+	// This instance's own answer is refused too, and for the neighbouring
+	// reason: its numbers came off a Grant and were already added by the route.
+	tally.add(relay.log, relay.ID(), "acme", fleetAnswer{
+		Origin:      relay.ID(),
+		Request:     "instance-one.whatever",
+		Tenant:      "acme",
+		Connections: 4,
+	})
+
+	if tally.connections != 0 {
+		t.Fatalf("this instance's own sockets were counted twice: %+v", tally)
+	}
+
+	// An answer to the question that was asked, about the tenant it was asked
+	// about, is the one that counts.
+	tally.add(relay.log, relay.ID(), "acme", fleetAnswer{
+		Origin:      "instance-two",
+		Request:     "instance-one.whatever",
+		Tenant:      "acme",
+		Connections: 4,
+		Channels: map[string]channelAnswer{
+			"presence-orders.17": {Subscriptions: 2, Users: []string{"ana", "", "ana"}},
+		},
+	})
+
+	if tally.connections != 4 {
+		t.Fatalf("the fleet's sockets counted %d, want 4", tally.connections)
+	}
+	if got := tally.channel("presence-orders.17"); got.subscriptions != 2 {
+		t.Fatalf("the fleet's subscriptions counted %d, want 2", got.subscriptions)
+	}
+	if got := tally.channel("presence-orders.17").members(); len(got) != 1 || got[0] != "ana" {
+		t.Fatalf("the fleet's members are %v, want the one person named twice and no empty id", got)
+	}
+	if got := tally.channel("invoices.9"); got.subscriptions != 0 || got.users != nil {
+		t.Fatalf("a channel nobody answered about is %+v, want nothing", got)
+	}
+}
+
+func TestARequestIDCollidesWithNothing(t *testing.T) {
+	t.Parallel()
+
+	// Two instances asking at the same moment, and one instance asking twice:
+	// the two ways a correlation collides, and an answer added to the wrong
+	// question is one customer's numbers on another customer's dashboard.
+	first, err := NewRelay(context.Background(), "instance-one", newRelayTestBus(), (&relayTestLog{}).logger())
+	if err != nil {
+		t.Fatalf("building the first relay: %v", err)
+	}
+	defer func() { _ = first.Close() }()
+
+	second, err := NewRelay(context.Background(), "instance-two", newRelayTestBus(), (&relayTestLog{}).logger())
+	if err != nil {
+		t.Fatalf("building the second relay: %v", err)
+	}
+	defer func() { _ = second.Close() }()
+
+	minted := make(map[string]bool, 2048)
+	for range 1024 {
+		for _, id := range []string{first.newRequestID(), second.newRequestID()} {
+			if minted[id] {
+				t.Fatalf("the request id %q was minted twice", id)
+			}
+			minted[id] = true
+		}
+	}
+
+	// The instance is in it, so that two ids minted in the same instant on two
+	// instances differ in more than luck.
+	if id := first.newRequestID(); !strings.HasPrefix(id, string(first.ID())+".") {
+		t.Fatalf("the request id %q does not name the instance that asked", id)
 	}
 }

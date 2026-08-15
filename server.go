@@ -134,6 +134,26 @@ type ServerConfig struct {
 	// Protocol is the frame layer. See [Protocol].
 	Protocol Protocol
 
+	// Relay is the other instances. With one, the four metrics routes answer
+	// for the whole fleet; without one they answer for this process, which is
+	// the true answer for a deployment of one and the wrong answer for any
+	// other -- two instances serving one application each hold half the sockets
+	// and neither can see the other half.
+	//
+	// It is optional because a relay is a Redis, and a server that refused to
+	// start without one would make the single-instance deployment the harder of
+	// the two. See [Relay].
+	Relay *Relay
+
+	// MetricsTimeout is how long a metrics route waits for the other instances
+	// before it answers with what has arrived. Zero means
+	// [DefaultMetricsTimeout].
+	//
+	// It is a bound and not a promise: an instance that answers after it is
+	// left out of that reply, because a dashboard served late by one instance
+	// being replaced is a dashboard that is down. See [Relay.ask].
+	MetricsTimeout time.Duration
+
 	// Log is where a refusal and a dropped socket are recorded. nil means
 	// slog.Default.
 	Log *slog.Logger
@@ -230,6 +250,9 @@ type Server struct {
 	subscribe SubscriptionPolicy
 	protocol  Protocol
 	log       *slog.Logger
+	// relay is the other instances, or nil for a deployment of one. It is what
+	// the four metrics routes ask, and nothing else here reads it.
+	relay *Relay
 
 	upgrader ws.Upgrader
 	mux      *http.ServeMux
@@ -354,6 +377,16 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	s.mux.HandleFunc("GET /apps/{appId}/channels/{channel}/users", s.handleChannelUsers)
 	s.mux.HandleFunc("POST /apps/{appId}/users/{userId}/terminate_connections", s.handleTerminate)
 	s.mux.HandleFunc("GET /up", s.handleUp)
+
+	// Last, because it starts goroutines: the relay subscribes to the fleet's
+	// questions from here on, and a server that failed to build after that
+	// would leave them answering for a process nobody can reach.
+	if cfg.Relay != nil {
+		if err := cfg.Relay.serve(s, cfg.MetricsTimeout); err != nil {
+			return nil, fmt.Errorf("joaju: this server cannot answer the fleet through its relay: %w", err)
+		}
+		s.relay = cfg.Relay
+	}
 
 	return s, nil
 }
@@ -787,6 +820,10 @@ func (s *Server) handleConnections(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Added and not reconciled: a socket is held by exactly one instance, so
+	// the fleet's count and this one's have nothing in common to double-count.
+	open += s.fleet(r.Context(), grant, "").connections
+
 	writeJSON(w, http.StatusOK, map[string]any{"connections": open})
 }
 
@@ -813,16 +850,34 @@ func (s *Server) handleChannels(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	elsewhere := s.fleet(r.Context(), grant, "")
+
 	// The key is [ChannelName.Requested] and never [ChannelName.String]: the
 	// caller asked about its own channels and the tenant they are held under is
 	// not its to read back.
-	listed := make(map[string]any, len(channels))
+	listed := make(map[string]any, len(channels)+len(elsewhere.channels))
 	for _, channel := range channels {
-		entry := map[string]any{"occupied": len(channel.Connections()) > 0}
+		requested := channel.Name().Requested()
+		fleet := elsewhere.channel(requested)
+		entry := map[string]any{"occupied": len(channel.Connections())+fleet.subscriptions > 0}
 		if channel.Name().Type().Presence() {
-			entry["user_count"] = countMembers(channel)
+			entry["user_count"] = countMembers(channel, fleet.users)
 		}
-		listed[channel.Name().Requested()] = entry
+		listed[requested] = entry
+	}
+	// A channel every subscriber of which is on another instance is still a
+	// channel this tenant has, and leaving it out would make the list say a
+	// customer is talking on fewer channels than they are.
+	for requested, fleet := range elsewhere.channels {
+		if _, held := listed[requested]; held {
+			continue
+		}
+
+		entry := map[string]any{"occupied": fleet.subscriptions > 0}
+		if fleetPresence(grant, requested) {
+			entry["user_count"] = len(fleet.users)
+		}
+		listed[requested] = entry
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{"channels": listed})
@@ -830,18 +885,23 @@ func (s *Server) handleChannels(w http.ResponseWriter, r *http.Request) {
 
 // handleChannel is GET /apps/{appId}/channels/{channel}: one channel.
 func (s *Server) handleChannel(w http.ResponseWriter, r *http.Request) {
-	channel, ok := s.channel(w, r)
+	channel, grant, ok := s.channel(w, r)
 	if !ok {
 		return
 	}
 
-	subscribers := channel.Connections()
+	name := channel.Name()
+	fleet := s.fleet(r.Context(), grant, name.Requested()).channel(name.Requested())
+
+	// A subscription is one socket on one channel and one socket is on one
+	// instance, so these add. The member count below does not: see [fleetAnswer].
+	subscribers := len(channel.Connections()) + fleet.subscriptions
 	body := map[string]any{
-		"occupied":           len(subscribers) > 0,
-		"subscription_count": len(subscribers),
+		"occupied":           subscribers > 0,
+		"subscription_count": subscribers,
 	}
-	if channel.Name().Type().Presence() {
-		body["user_count"] = countMembers(channel)
+	if name.Type().Presence() {
+		body["user_count"] = countMembers(channel, fleet.users)
 	}
 
 	writeJSON(w, http.StatusOK, body)
@@ -850,7 +910,7 @@ func (s *Server) handleChannel(w http.ResponseWriter, r *http.Request) {
 // handleChannelUsers is GET /apps/{appId}/channels/{channel}/users: the members
 // of a presence channel.
 func (s *Server) handleChannelUsers(w http.ResponseWriter, r *http.Request) {
-	channel, ok := s.channel(w, r)
+	channel, grant, ok := s.channel(w, r)
 	if !ok {
 		return
 	}
@@ -859,12 +919,23 @@ func (s *Server) handleChannelUsers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	requested := channel.Name().Requested()
+	fleet := s.fleet(r.Context(), grant, requested).channel(requested)
+
 	seen := make(map[string]bool)
-	users := make([]map[string]string, 0, len(channel.Connections()))
+	users := make([]map[string]string, 0, len(channel.Connections())+len(fleet.users))
 	for _, subscriber := range channel.Connections() {
 		// One member may hold several sockets on one channel -- two tabs -- and
 		// the member list names people, not sockets.
 		if id := subscriber.Member.UserID; id != "" && !seen[id] {
+			seen[id] = true
+			users = append(users, map[string]string{"id": id})
+		}
+	}
+	// The two tabs may also be on two instances, which is the same person and
+	// the same reason: this is a union and never a concatenation.
+	for _, id := range fleet.members() {
+		if !seen[id] {
 			seen[id] = true
 			users = append(users, map[string]string{"id": id})
 		}
@@ -934,30 +1005,34 @@ func (s *Server) enter(w http.ResponseWriter, r *http.Request) (auth.Grant, bool
 // channel is the second half of the three routes that name one: [Server.enter],
 // then the name built out of the Grant, then the [SubscriptionPolicy], then the
 // Broker.
-func (s *Server) channel(w http.ResponseWriter, r *http.Request) (Channel, bool) {
+//
+// The Grant comes back with the channel because the two metrics routes have a
+// second half of their own -- [Server.fleet], which reads the tenant off it and
+// off nothing that arrived with the request (RULE 14).
+func (s *Server) channel(w http.ResponseWriter, r *http.Request) (Channel, auth.Grant, bool) {
 	connected, ok := s.enter(w, r)
 	if !ok {
-		return nil, false
+		return nil, auth.Grant{}, false
 	}
 
 	name, err := NewChannelName(connected, r.PathValue("channel"))
 	if err != nil {
 		s.fail(w, r, err)
-		return nil, false
+		return nil, auth.Grant{}, false
 	}
 	grant, err := s.reach(r.Context(), connected.Subject(), name, "")
 	if err != nil {
 		s.fail(w, r, err)
-		return nil, false
+		return nil, auth.Grant{}, false
 	}
 
 	channel, err := s.broker.Find(r.Context(), grant, name)
 	if err != nil {
 		s.fail(w, r, err)
-		return nil, false
+		return nil, auth.Grant{}, false
 	}
 
-	return channel, true
+	return channel, grant, true
 }
 
 // reach runs the [SubscriptionPolicy] for one channel and answers the Grant it
@@ -1020,8 +1095,16 @@ func writeJSON(w http.ResponseWriter, status int, body any) {
 
 // countMembers is how many distinct people a presence channel holds, which is
 // not how many sockets it holds: two tabs are one member.
-func countMembers(channel Channel) int {
-	seen := make(map[string]bool)
+//
+// fleet is the same channel's members on the other instances, and it is a set
+// of ids rather than a count for exactly the reason this function exists: the
+// two tabs may be on two instances, and adding two counts would make one person
+// two people. It is empty on a deployment of one.
+func countMembers(channel Channel, fleet map[string]bool) int {
+	seen := make(map[string]bool, len(fleet))
+	for id := range fleet {
+		seen[id] = true
+	}
 	for _, subscriber := range channel.Connections() {
 		if id := subscriber.Member.UserID; id != "" {
 			seen[id] = true
