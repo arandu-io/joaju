@@ -387,10 +387,14 @@ func (p *pusher) part(ctx context.Context, conn *Connection, f Frame) error {
 // Accept is given -- the [ChannelName], built from the socket's Grant so the
 // tenant is never the sender's to choose, and whether the sender is on it.
 //
-// The seat is what answers the second, and [Channel.Subscribed] confirms it: the
-// record here says this socket subscribed, and the channel says whether it is
-// still seated. A socket with no seat for the name is not subscribed and the
-// channel is never reached, so a client cannot use a client event to find out
+// The seat is what answers the second, and [Channel.Find] confirms it: the
+// record here says this socket subscribed, the channel says whether it is still
+// seated, and what it hands back is the [Subscriber] it seated -- whose [Member]
+// is who the sender is. One lookup answers both, and it has to be the same one:
+// the user_id that goes out on the relayed frame is the channel's record of who
+// took the seat, which is the only account of the sender's identity that the
+// sender did not write. A socket with no seat for the name is not subscribed and
+// the channel is never reached, so a client cannot use a client event to find out
 // which channels exist.
 //
 // What goes out is [Channel.Broadcast] and not BroadcastToAll: [Event.Socket] is
@@ -403,9 +407,13 @@ func (p *pusher) whisper(ctx context.Context, conn *Connection, f Frame) error {
 	}
 
 	held, seated := p.seatOf(conn.ID(), name)
-	subscribed := seated && held.channel.Subscribed(conn)
+	var sender Subscriber
+	var subscribed bool
+	if seated {
+		sender, subscribed = held.channel.Find(conn.ID())
+	}
 
-	event, err := p.events.Accept(f, name, conn.ID(), subscribed)
+	event, err := p.events.Accept(f, name, conn.ID(), sender.Member, subscribed)
 	if err != nil {
 		return err
 	}

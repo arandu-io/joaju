@@ -472,6 +472,20 @@ type Event struct {
 	//
 	// Empty means the event came from the server and goes to everyone.
 	Socket SocketID
+
+	// UserID is who published a relayed client event, and is empty on
+	// everything else.
+	//
+	// It is the sender's [Member.UserID] as the channel holds it, which is the
+	// identity a [SubscriptionPolicy] settled when it seated them -- never the
+	// one the sending frame claimed. A receiver drawing "somebody is typing"
+	// has no other way to name them: the payload is a stranger's bytes, so a
+	// user_id inside it says whatever that stranger wanted it to say.
+	//
+	// It is empty off a presence channel, because a channel that publishes
+	// nothing about who is listening has no member to name. The field is then
+	// absent from the frame rather than empty in it -- see [EventFrame].
+	UserID string
 }
 
 // Handshake is what a [ConnectPolicy] decides about: one client asking to open

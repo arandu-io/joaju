@@ -439,6 +439,12 @@ func CacheMiss(name ChannelName) (Frame, error) {
 // [Event.Socket] is not in the frame. It says who not to send this to, which is
 // the sender's business and the channel's, and it is answered before this is
 // called.
+//
+// [Event.UserID] is, and only when there is one. It is set on a client event
+// relayed from a presence channel and on nothing else, and [Frame.MarshalJSON]
+// leaves the field out when it is empty -- so a private channel's frames keep
+// the shape they had. A user_id of "" is a key a client validating a schema has
+// to be taught to expect, in exchange for a value that never names anybody.
 func EventFrame(e Event) (Frame, error) {
 	if e.Name == "" {
 		return Frame{}, errors.New("joaju: an event with no name cannot be sent")
@@ -447,7 +453,7 @@ func EventFrame(e Event) (Frame, error) {
 		return Frame{}, errors.New("joaju: an event with no channel cannot be sent")
 	}
 
-	return Frame{Event: e.Name, Channel: e.Channel.Requested(), Data: e.Data}, nil
+	return Frame{Event: e.Name, Channel: e.Channel.Requested(), Data: e.Data, UserID: e.UserID}, nil
 }
 
 // SubscribeRequest is the data of a [EventSubscribe] frame: what a client asked
@@ -599,10 +605,36 @@ func memberID(raw json.RawMessage) (string, error) {
 // not move: the channel has to be one a policy guarded, and the sender has to
 // be subscribed to it.
 //
-// Reverb offers three settings -- off, "members" and "all" -- where "all" lets
-// a client publish to a channel it never joined. That third one is not here.
-// Two ways to relay a client event is a second code path (RULE 9), and the
-// looser of two paths is the one that ends up in production.
+// # Why there are two states and not three
+//
+// Reverb spells the same switch as accept_client_events_from, and it reads three
+// values: "members", "all", and anything else for off. The two here are its off
+// and its "members". The third was measured against this file rather than
+// declined on principle, and what it changes there is three things -- two of
+// which cannot exist here, and the third of which is the authorization:
+//
+//   - under "all" the sender need not be on the channel. There is no frame a
+//     client can send that reaches a [Channel] it did not subscribe to: the
+//     caller of Accept is handed the seat the socket already holds, and nothing
+//     on that path asks a [Broker] for a channel. Adding the lookup would be a
+//     socket publishing into a private channel no [SubscriptionPolicy] ever saw
+//     (RULE 17), which is the leak this repository exists not to have;
+//   - under "members" Reverb rebuilds the relayed payload out of three named
+//     fields, because under "all" it forwards the sender's frame verbatim --
+//     every extra top-level key it carried included, a user_id the sender wrote
+//     for itself among them. Here a relayed frame is built field by field out of
+//     an [Event], and there is no verbatim path for a setting to pick;
+//   - under "all" no user_id is stamped. Here it comes off the channel's record
+//     of the seat, so the only way not to have one is not to have a seat, which
+//     is the first point again.
+//
+// So the setting would be a name for the membership check with a value that
+// turns it off, and one more way to relay a client event (RULE 9) -- the looser
+// of two paths being the one that ends up in production. Reverb's own two
+// defaults already disagree about which value it is: config/reverb.php:90
+// publishes "members" and ConfigApplicationProvider falls back to "all" when the
+// key is absent. A switch that is one thing in the config file and another in
+// the code is a switch nobody knows the state of.
 type ClientEvents bool
 
 // The two states of [ClientEvents], named so a call site reads as a decision
@@ -624,15 +656,24 @@ const (
 // [ChannelName.Requested] has to match what the frame said, which catches the
 // caller resolving one name and relaying another. from is the sender, and it
 // ends up in [Event.Socket] so the relay does not send them their own message
-// back. subscribed is whether that socket is on that channel, which the caller
-// answers with [Channel.Subscribed].
+// back. sender and subscribed are the seat the channel is holding for them, and
+// [Channel.Find] answers both at once.
+//
+// sender becomes [Event.UserID], and is the whole of who the receivers are told
+// this came from. It is the [Member] the channel seated, so it is the identity a
+// [SubscriptionPolicy] was asked about; it is the zero [Member] off a presence
+// channel, and the relayed frame then carries no user_id at all. The frame's own
+// [Frame.UserID] is never read here, and that is the point of taking the sender
+// as an argument rather than off f: a client that writes a user_id into a client
+// event is a client naming somebody else as the sender, and the channel's record
+// is the one place that answer is not the sender's to write.
 //
 // The refusals, in the order they are made: not a client event at all is
 // [ErrInvalidMessage]; the switch being off is [ErrClientEventsDisabled]; a
 // public channel is [ErrClientEventChannel]; not being subscribed is
 // [ErrNotSubscribed]. Each is a [ProtocolError], so [ErrorFrame] carries it to
 // the client with its code intact.
-func (c ClientEvents) Accept(f Frame, channel ChannelName, from SocketID, subscribed bool) (Event, error) {
+func (c ClientEvents) Accept(f Frame, channel ChannelName, from SocketID, sender Member, subscribed bool) (Event, error) {
 	if !f.IsClientEvent() {
 		return Event{}, fmt.Errorf("%w: %s is not a client event", ErrInvalidMessage, f.Event)
 	}
@@ -652,5 +693,5 @@ func (c ClientEvents) Accept(f Frame, channel ChannelName, from SocketID, subscr
 		return Event{}, ErrNotSubscribed
 	}
 
-	return Event{Name: f.Event, Channel: channel, Data: f.Data, Socket: from}, nil
+	return Event{Name: f.Event, Channel: channel, Data: f.Data, Socket: from, UserID: sender.UserID}, nil
 }

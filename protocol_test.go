@@ -667,16 +667,55 @@ func TestPusherRelaysAClientEventToTheOthersAndNotToTheSender(t *testing.T) {
 
 	protocolSend(t, sender, `{"event":"client-typing","channel":"private-room.1","data":"{\"at\":1}"}`)
 
+	// A private channel seats no member, so the frame carries no user_id at all
+	// -- not an empty one. [joaju.Encode] is the only thing that writes a frame
+	// and re-encoding what came off the wire reproduces it, so this is the
+	// bytes the other subscriber was sent.
 	relayed := protocolNext(t, other)
-	if relayed.Event != "client-typing" || relayed.Channel != "private-room.1" {
-		t.Fatalf("the other subscriber received %+v, want the client event", relayed)
-	}
-	if string(relayed.Data) != `{"at":1}` {
-		t.Fatalf("the client event carried %s, want the payload it was sent with", relayed.Data)
+	want := `{"event":"client-typing","data":"{\"at\":1}","channel":"private-room.1"}`
+	if got := encode(t, relayed); got != want {
+		t.Fatalf("the other subscriber received %s, want %s", got, want)
 	}
 
 	// The sender already drew its own message. Delivering it back would draw it
 	// twice.
+	protocolSilence(t, sender)
+}
+
+// The whole of what a client event is for: the receivers learn who typed.
+//
+// The frame the sender wrote names somebody else, and it is ignored. What goes
+// out is the member the channel seated, which is the one a
+// [joaju.SubscriptionPolicy] was asked about.
+func TestPusherRelaysAClientEventOnAPresenceChannelWithTheSendersUserID(t *testing.T) {
+	f := newProtocolFixture(t, joaju.PusherConfig{ClientEvents: joaju.ClientEventsOn})
+
+	other, _ := f.open(t)
+	protocolSend(t, other, `{"event":"pusher:subscribe","data":{"channel":"presence-room.1","channel_data":"{\"user_id\":\"u1\"}"}}`)
+	if confirmation := protocolNext(t, other); confirmation.Event != joaju.EventSubscriptionSucceeded {
+		t.Fatalf("subscribing answered %s (%s)", confirmation.Event, confirmation.Data)
+	}
+
+	sender, _ := f.open(t)
+	protocolSend(t, sender, `{"event":"pusher:subscribe","data":{"channel":"presence-room.1","channel_data":"{\"user_id\":\"u2\",\"user_info\":{\"name\":\"Ana\"}}"}}`)
+	if confirmation := protocolNext(t, sender); confirmation.Event != joaju.EventSubscriptionSucceeded {
+		t.Fatalf("subscribing answered %s (%s)", confirmation.Event, confirmation.Data)
+	}
+
+	// The arrival reaches whoever was already there, and reaches them before the
+	// whisper does: both are written from the sender's own goroutine, in order.
+	if added := protocolNext(t, other); added.Event != joaju.EventMemberAdded {
+		t.Fatalf("the first subscriber was told %+v, want %s", added, joaju.EventMemberAdded)
+	}
+
+	protocolSend(t, sender, `{"event":"client-typing","channel":"presence-room.1","user_id":"nobody","data":"{\"at\":1}"}`)
+
+	relayed := protocolNext(t, other)
+	want := `{"event":"client-typing","data":"{\"at\":1}","channel":"presence-room.1","user_id":"u2"}`
+	if got := encode(t, relayed); got != want {
+		t.Fatalf("the other subscriber received %s, want %s", got, want)
+	}
+
 	protocolSilence(t, sender)
 }
 

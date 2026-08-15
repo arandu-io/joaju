@@ -394,7 +394,7 @@ func TestClientEventsAreOffInTheZeroValue(t *testing.T) {
 	var events joaju.ClientEvents
 
 	f := joaju.Frame{Event: "client-typing", Channel: "private-room.1"}
-	_, err := events.Accept(f, channelName(t, "private-room.1"), "7.1", true)
+	_, err := events.Accept(f, channelName(t, "private-room.1"), "7.1", joaju.Member{}, true)
 	if !errors.Is(err, joaju.ErrClientEventsDisabled) {
 		t.Fatalf("Accept() = %v, want ErrClientEventsDisabled", err)
 	}
@@ -402,7 +402,7 @@ func TestClientEventsAreOffInTheZeroValue(t *testing.T) {
 
 func TestClientEventsRefuseAPublicChannel(t *testing.T) {
 	f := joaju.Frame{Event: "client-typing", Channel: "room.1"}
-	_, err := joaju.ClientEventsOn.Accept(f, channelName(t, "room.1"), "7.1", true)
+	_, err := joaju.ClientEventsOn.Accept(f, channelName(t, "room.1"), "7.1", joaju.Member{}, true)
 	if !errors.Is(err, joaju.ErrClientEventChannel) {
 		t.Fatalf("Accept() = %v, want ErrClientEventChannel", err)
 	}
@@ -410,7 +410,7 @@ func TestClientEventsRefuseAPublicChannel(t *testing.T) {
 
 func TestClientEventsRefuseSomebodyWhoIsNotOnTheChannel(t *testing.T) {
 	f := joaju.Frame{Event: "client-typing", Channel: "private-room.1"}
-	_, err := joaju.ClientEventsOn.Accept(f, channelName(t, "private-room.1"), "7.1", false)
+	_, err := joaju.ClientEventsOn.Accept(f, channelName(t, "private-room.1"), "7.1", joaju.Member{}, false)
 	if !errors.Is(err, joaju.ErrNotSubscribed) {
 		t.Fatalf("Accept() = %v, want ErrNotSubscribed", err)
 	}
@@ -418,7 +418,7 @@ func TestClientEventsRefuseSomebodyWhoIsNotOnTheChannel(t *testing.T) {
 
 func TestClientEventsRefuseAFrameThatIsNotOne(t *testing.T) {
 	f := joaju.Frame{Event: joaju.EventMemberAdded, Channel: "presence-room.1"}
-	_, err := joaju.ClientEventsOn.Accept(f, channelName(t, "presence-room.1"), "7.1", true)
+	_, err := joaju.ClientEventsOn.Accept(f, channelName(t, "presence-room.1"), "7.1", joaju.Member{}, true)
 	if !errors.Is(err, joaju.ErrInvalidMessage) {
 		t.Fatalf("Accept() = %v, want ErrInvalidMessage", err)
 	}
@@ -426,7 +426,7 @@ func TestClientEventsRefuseAFrameThatIsNotOne(t *testing.T) {
 
 func TestClientEventsRefuseAChannelResolvedFromAnotherName(t *testing.T) {
 	f := joaju.Frame{Event: "client-typing", Channel: "private-room.1"}
-	_, err := joaju.ClientEventsOn.Accept(f, channelName(t, "private-room.2"), "7.1", true)
+	_, err := joaju.ClientEventsOn.Accept(f, channelName(t, "private-room.2"), "7.1", joaju.Member{}, true)
 	if !errors.Is(err, joaju.ErrInvalidMessage) {
 		t.Fatalf("Accept() = %v, want ErrInvalidMessage", err)
 	}
@@ -436,7 +436,9 @@ func TestClientEventsAcceptASubscriberOfAGuardedChannel(t *testing.T) {
 	name := channelName(t, "private-room.1")
 	f := joaju.Frame{Event: "client-typing", Channel: "private-room.1", Data: json.RawMessage(`{"at":1}`)}
 
-	e, err := joaju.ClientEventsOn.Accept(f, name, "7.1", true)
+	// A private channel seats no member, so there is nobody to name and the
+	// relayed frame says so by leaving the field out.
+	e, err := joaju.ClientEventsOn.Accept(f, name, "7.1", joaju.Member{}, true)
 	if err != nil {
 		t.Fatalf("Accept() = %v", err)
 	}
@@ -451,6 +453,53 @@ func TestClientEventsAcceptASubscriberOfAGuardedChannel(t *testing.T) {
 	}
 	if string(e.Data) != `{"at":1}` {
 		t.Errorf("Data = %s, want {\"at\":1}", e.Data)
+	}
+	if e.UserID != "" {
+		t.Errorf("UserID = %s, want none: a private channel has no member to name", e.UserID)
+	}
+
+	relayed, err := joaju.EventFrame(e)
+	if err != nil {
+		t.Fatalf("EventFrame() = %v", err)
+	}
+
+	want := `{"event":"client-typing","data":"{\"at\":1}","channel":"private-room.1"}`
+	if got := encode(t, relayed); got != want {
+		t.Errorf("Encode() = %s, want %s -- a user_id of \"\" is a key a client has to be taught to expect", got, want)
+	}
+}
+
+// The user_id on a relayed client event is the channel's record of who took the
+// seat, and a frame that claims another one does not get to say so. This is what
+// makes "somebody is typing" name a person rather than a stranger's byte.
+func TestClientEventsCarryTheSeatedMemberAndNotTheUserIDTheFrameClaims(t *testing.T) {
+	name := channelName(t, "presence-room.1")
+	f := joaju.Frame{
+		Event:   "client-typing",
+		Channel: "presence-room.1",
+		Data:    json.RawMessage(`{"at":1}`),
+		UserID:  "somebody-else",
+	}
+
+	e, err := joaju.ClientEventsOn.Accept(f, name, "7.1", joaju.Member{UserID: "7", Info: json.RawMessage(`{"name":"Ana"}`)}, true)
+	if err != nil {
+		t.Fatalf("Accept() = %v", err)
+	}
+	if e.UserID != "7" {
+		t.Fatalf("UserID = %s, want 7 -- the member the channel seated, not the one the frame named", e.UserID)
+	}
+
+	relayed, err := joaju.EventFrame(e)
+	if err != nil {
+		t.Fatalf("EventFrame() = %v", err)
+	}
+
+	// The user_id is top level and beside the channel, which is where a Pusher
+	// client reads it. [Member.Info] is not in it: the receivers were given it
+	// when the member arrived.
+	want := `{"event":"client-typing","data":"{\"at\":1}","channel":"presence-room.1","user_id":"7"}`
+	if got := encode(t, relayed); got != want {
+		t.Errorf("Encode() = %s, want %s", got, want)
 	}
 }
 
