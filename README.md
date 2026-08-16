@@ -46,6 +46,14 @@ every route that touches one. Subscribing is a read, and there is no exception
 for reads. A connection cannot be built without a Grant, a channel name cannot
 either, and the tenant is read off the Grant rather than off the wire.
 
+**The browser half is here too.** Subpackage `client` is the JavaScript that
+speaks this protocol from a page — written here, embedded with `go:embed`,
+served from the application's own origin under `script-src 'self'`. No npm, no
+CDN, no build step, no `package.json` anywhere in the repository. It honours the
+`activity_timeout` the server sends, reconnects with exponential backoff and
+jitter and resubscribes what it held, and fetches authorization for private and
+presence channels the way the protocol defines.
+
 **Broadcast that crosses instances.** A `Relay` hands the fleet an event this
 instance has already delivered, and the four metrics routes ask the others and
 add up what answers in time; a bus it cannot reach degrades to this process
@@ -75,10 +83,14 @@ means and what leaving it out means.
 
 ## What is not here yet
 
-- **No view.** `Counter` keeps per-tenant totals, and nothing displays them:
-  there is no dashboard and no kyse component for a connection or a message.
-- **No client.** Nothing in this repository is served to a browser. The shape is
-  decided — vendored, by `go:embed`, under `script-src 'self'` — and unwritten.
+- **Nothing exports the counts.** `Counter` keeps per-tenant totals and hands
+  them to whoever asks; there is no OpenTelemetry exporter, which is what
+  production is meant to read them through. `arandu-io/kyse` draws them with
+  `StatCard` in the meantime.
+- **The client is not routed by this server.** Subpackage `client` embeds the
+  JavaScript that speaks this protocol from a page, and serving it is the
+  application's: the script has to come from the origin the page is on, and a
+  socket server is frequently not that origin.
 - **The process runs alone.** `cmd/joaju` builds its server with no `Relay`, so
   a publish reaches the sockets it holds and the metrics routes answer for it
   alone. A second instance needs the library, a bus and the wiring by hand.
