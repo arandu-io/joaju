@@ -103,13 +103,22 @@ type relayTestBus struct {
 	publishErr   error
 	subscribeErr error
 	publishes    int
+	// carried is every payload that crossed, keyed by topic and in order. What
+	// two instances say to each other is a wire format like any other, and this
+	// is where a test reads the bytes of it.
+	carried map[string][]string
 }
 
 func newRelayTestBus() *relayTestBus {
-	return &relayTestBus{subscribers: make(map[string][]chan string)}
+	return &relayTestBus{
+		subscribers: make(map[string][]chan string),
+		carried:     make(map[string][]string),
+	}
 }
 
 func (b *relayTestBus) Publish(_ context.Context, channel string, message any) (int64, error) {
+	payload, _ := message.(string)
+
 	b.mu.Lock()
 	if b.publishErr != nil {
 		err := b.publishErr
@@ -118,10 +127,10 @@ func (b *relayTestBus) Publish(_ context.Context, channel string, message any) (
 		return 0, err
 	}
 	b.publishes++
+	b.carried[channel] = append(b.carried[channel], payload)
 	targets := append([]chan string(nil), b.subscribers[channel]...)
 	b.mu.Unlock()
 
-	payload, _ := message.(string)
 	for _, target := range targets {
 		select {
 		case target <- payload:
@@ -169,6 +178,14 @@ func (b *relayTestBus) Subscribe(ctx context.Context, channels []string, callbac
 			callback(message, channels[0])
 		}
 	}
+}
+
+// published is what crossed one topic, in order.
+func (b *relayTestBus) published(topic string) []string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	return append([]string(nil), b.carried[topic]...)
 }
 
 func (b *relayTestBus) listeners(topic string) int {
@@ -1408,5 +1425,157 @@ func TestARequestIDCollidesWithNothing(t *testing.T) {
 	// instances differ in more than luck.
 	if id := first.newRequestID(); !strings.HasPrefix(id, string(first.ID())+".") {
 		t.Fatalf("the request id %q does not name the instance that asked", id)
+	}
+}
+
+// whisperTestInstance is one process a client event has to cross: the Pusher
+// protocol over a Broker that is joined to the fleet.
+//
+// It is [newFleetTestInstance] with the two halves that fixture stubs out made
+// real, and without the [Server]: a client event arrives as a frame and is
+// answered by the [Protocol], so no route is on this path. The protocol is the
+// real one because nothing else produces a client- event, and the Broker is the
+// real one because what a receiver reads is written by a [channel] to the sockets
+// it seated.
+type whisperTestInstance struct {
+	protocol Protocol
+	relay    *Relay
+}
+
+func newWhisperTestInstance(t *testing.T, id InstanceID, bus Bus) *whisperTestInstance {
+	t.Helper()
+
+	relay, err := NewRelay(context.Background(), id, bus, (&relayTestLog{}).logger())
+	if err != nil {
+		t.Fatalf("building the relay of %s: %v", id, err)
+	}
+	t.Cleanup(func() { _ = relay.Close() })
+
+	// One value, handed to the protocol -- which is what [NewServer] refuses a
+	// server for not doing, and what puts the relay within the protocol's reach.
+	broker := RelayedBroker(NewMemoryBroker(), relay)
+
+	return &whisperTestInstance{
+		protocol: NewPusher(broker, relayTestPolicy{}, PusherConfig{ClientEvents: ClientEventsOn}),
+		relay:    relay,
+	}
+}
+
+// seat opens a socket on this instance and subscribes it as user, with the frame
+// a browser sends.
+func (i *whisperTestInstance) seat(t *testing.T, tenant, user, requested string) (*Connection, *channelTestSink) {
+	t.Helper()
+
+	conn, sink := channelTestConnection(t, tenant, user)
+	i.send(t, conn, `{"event":"pusher:subscribe","data":{"channel":"`+requested+
+		`","channel_data":"{\"user_id\":\"`+user+`\"}"}}`)
+
+	return conn, sink
+}
+
+// send hands one frame to this instance, as the goroutine reading that socket
+// does.
+func (i *whisperTestInstance) send(t *testing.T, conn *Connection, frame string) {
+	t.Helper()
+
+	if err := i.protocol.Message(context.Background(), conn, []byte(frame)); err != nil {
+		t.Fatalf("%s answered %s with %v", i.relay.ID(), frame, err)
+	}
+}
+
+// whisperTestReceived is every client event one socket was written, as bytes.
+//
+// A subscriber's sink also holds its subscription confirmation and the arrivals
+// it was told about. This test compares whole frames, so the ones that are not
+// client events are left out rather than counted around.
+func whisperTestReceived(t *testing.T, sink *channelTestSink) []string {
+	t.Helper()
+
+	sink.mu.Lock()
+	defer sink.mu.Unlock()
+
+	received := make([]string, 0, len(sink.messages))
+	for _, message := range sink.messages {
+		var f Frame
+		if err := json.Unmarshal(message, &f); err != nil {
+			t.Fatalf("a socket was written something that is not a frame: %v (%s)", err, message)
+		}
+		if f.IsClientEvent() {
+			received = append(received, string(message))
+		}
+	}
+
+	return received
+}
+
+// A client event reaches the fleet, and it reaches it carrying who sent it.
+//
+// It used to stop at [Channel.Broadcast], so two browsers on one channel saw
+// each other type only while the same process happened to hold both -- the
+// defect [Server.carry] fixed for the events API, on the half that was measured
+// later. What a receiver draws is "u2 is typing", so the sender's user_id has to
+// survive the bus: it is stamped from the seat the channel holds on the instance
+// that took the frame, and no other instance has a seat for that socket to read
+// it off.
+func TestAClientEventCrossesTheFleetCarryingTheSendersUserID(t *testing.T) {
+	t.Parallel()
+
+	bus := newRelayTestBus()
+	name := relayTestName(t, "acme", "presence-room.1")
+
+	here := newWhisperTestInstance(t, "instance-one", bus)
+	there := newWhisperTestInstance(t, "instance-two", bus)
+
+	sender, senderSink := here.seat(t, "acme", "u2", "presence-room.1")
+	_, neighbour := here.seat(t, "acme", "u1", "presence-room.1")
+	_, remote := there.seat(t, "acme", "u3", "presence-room.1")
+
+	waitFor(t, "both instances to relay the channel", func() bool {
+		return bus.listeners(Topic(name)) == 2
+	})
+
+	// The frame names somebody else, and it is ignored: [ClientEvents.Accept]
+	// reads the seat and never the frame.
+	here.send(t, sender, `{"event":"client-typing","channel":"presence-room.1","user_id":"nobody","data":"{\"at\":1}"}`)
+
+	want := `{"event":"client-typing","data":"{\"at\":1}","channel":"presence-room.1","user_id":"u2"}`
+	waitFor(t, "the socket on the other instance to receive the client event", func() bool {
+		return len(whisperTestReceived(t, remote)) > 0
+	})
+	// Nothing proves a negative. By the time the other instance has delivered,
+	// the message has been round the bus -- which is the moment the instance it
+	// came from would have delivered it a second time.
+	time.Sleep(20 * time.Millisecond)
+
+	if got := whisperTestReceived(t, remote); len(got) != 1 || got[0] != want {
+		t.Fatalf("the socket on the other instance received %v, want the one frame %s", got, want)
+	}
+	// The sender's instance delivered it once, on the broadcast, and did not
+	// deliver its own message a second time when it came back round the bus.
+	if got := whisperTestReceived(t, neighbour); len(got) != 1 || got[0] != want {
+		t.Fatalf("the socket on the sender's instance received %v, want the one frame %s", got, want)
+	}
+	// The sender drew its own message before it sent it.
+	if got := whisperTestReceived(t, senderSink); len(got) != 0 {
+		t.Fatalf("the sender was written its own client event back: %v", got)
+	}
+
+	// The bytes on the bus, which is where the user_id had to survive unchanged.
+	// One message; the instance that sent it on the front, which is what stops
+	// it being delivered twice there; no tenant in the payload, because the
+	// [Topic] carries that; and the id the channel seated rather than the one the
+	// frame claimed.
+	carried := bus.published(Topic(name))
+	wantCarried := `{"origin":"instance-one","event":"client-typing","channel":"presence-room.1","data":{"at":1},"socket":"acme.u2","user_id":"u2"}`
+	if len(carried) != 1 || carried[0] != wantCarried {
+		t.Fatalf("the fleet was sent %v, want the one message %s", carried, wantCarried)
+	}
+
+	// Nothing on the receiving instance was reached with a Grant built from any
+	// of that: the channel there exists because a socket subscribed to it, under
+	// a Grant of its own, and [Relay.deliver] takes the name from that
+	// subscription. The remote instance is holding one channel and it is acme's.
+	if joined := there.relay.Joined(); joined != 1 {
+		t.Fatalf("the other instance relays %d channels, want the one its own socket subscribed to", joined)
 	}
 }

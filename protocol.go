@@ -408,6 +408,12 @@ func (p *pusher) part(ctx context.Context, conn *Connection, f Frame) error {
 // What goes out is [Channel.Broadcast] and not BroadcastToAll: [Event.Socket] is
 // the sender and a browser that already drew its own message does not need it
 // back.
+//
+// That broadcast is half the delivery, and [pusher.carry] is the other half: the
+// same [Event] goes to the other instances, exactly as [Server.publish] hands one
+// from the API to [Server.carry]. A client event that stopped at the broadcast
+// would reach the browsers this process happens to hold and no others, which on a
+// deployment of one is indistinguishable from working.
 func (p *pusher) whisper(ctx context.Context, conn *Connection, f Frame) error {
 	name, err := NewChannelName(conn.Grant(), f.Channel)
 	if err != nil {
@@ -426,7 +432,44 @@ func (p *pusher) whisper(ctx context.Context, conn *Connection, f Frame) error {
 		return err
 	}
 
-	return held.channel.Broadcast(ctx, event)
+	if err := held.channel.Broadcast(ctx, event); err != nil {
+		return err
+	}
+
+	// The other instances, after the local delivery and never instead of it.
+	// This cannot refuse the frame -- see [pusher.carry].
+	p.carry(ctx, event)
+
+	return nil
+}
+
+// carry hands a client event to the other instances, and is the outbound half of
+// [pusher.whisper].
+//
+// The relay is reached through the [Broker] because that is the value the
+// protocol and the [Server] are made to share: [NewServer] refuses a Relay whose
+// Broker did not come from [RelayedBroker], and refuses one that did not also
+// reach [NewPusher]. So a Broker that is not relayed here is a deployment with no
+// fleet in it, and there is nobody to carry to. Taking a [Relay] of its own would
+// be a second thing to wire, a second thing to leave half-wired, and a second
+// answer to which relay this server is on (RULE 9).
+//
+// It runs after [Channel.Broadcast] and never instead of it, and it answers
+// nothing because there is nothing a client could do with the answer: every
+// socket on this instance already has the message, and a bus that is down costs
+// reach and not delivery. The failure is recorded in [Relay.carry], which is
+// where the same decision is made for the events API.
+//
+// No lock is held here. [pusher.seatOf] released it before the broadcast, and
+// this runs on the goroutine that reads the sender's socket -- the same one the
+// broadcast ran on.
+func (p *pusher) carry(ctx context.Context, e Event) {
+	relayed, ok := p.broker.(relayedBroker)
+	if !ok {
+		return
+	}
+
+	relayed.relay.carry(ctx, e)
 }
 
 // reach is [Broker.FindOrCreate] and the answer it does not give: whether the

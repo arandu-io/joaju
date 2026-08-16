@@ -167,6 +167,21 @@ type relayMessage struct {
 	// events API can name a socket that is held by any instance, and the one
 	// holding it is not usually the one that took the request.
 	Socket SocketID `json:"socket,omitempty"`
+	// UserID is [Event.UserID]: who published a client event, and is empty on
+	// everything else.
+	//
+	// It travels for the reason Socket does -- it is a fact of the instance that
+	// took the frame, and no other instance can recover it. The sender holds a
+	// seat on that one process and nowhere else, so an instance receiving this
+	// has nothing of its own to name them by: a client event that arrived
+	// without it would draw "somebody is typing" for every receiver outside the
+	// sender's own instance, which is the whole of what a client event is for.
+	//
+	// It is the [Member.UserID] the channel seated and never the one the sending
+	// frame claimed -- [ClientEvents.Accept] is the only thing that sets it -- so
+	// relaying it discloses nothing that was not already going to the receivers
+	// on the instance it came from.
+	UserID string `json:"user_id,omitempty"`
 }
 
 // fleetQuestion is one instance asking the others what they are holding, and is
@@ -645,6 +660,7 @@ func (r *Relay) Publish(ctx context.Context, e Event) error {
 		Channel: e.Channel.Requested(),
 		Data:    e.Data,
 		Socket:  e.Socket,
+		UserID:  e.UserID,
 	})
 	if err != nil {
 		return fmt.Errorf("joaju: encoding %s for the fleet: %w", e.Name, err)
@@ -658,6 +674,28 @@ func (r *Relay) Publish(ctx context.Context, e Event) error {
 	r.recovered()
 
 	return nil
+}
+
+// carry is [Relay.Publish] with nowhere to report a failure to, and is what both
+// halves of the server call.
+//
+// Two things receive an event from outside and both reach the fleet through
+// here: [Server.carry], for POST /apps/{appId}/events, and [pusher.carry], for a
+// client- frame off a socket. It is one function and not one per caller because
+// what to do about a failure is a decision rather than a line -- a second copy is
+// a second answer the first time one of them is changed (RULE 9).
+//
+// Nothing it does can fail whatever caused it, which is why it answers nothing.
+// [Relay.Publish] answers a bus it cannot reach with nil -- what an outage costs
+// is reach, and the local delivery has already happened -- so an error here is a
+// malformed event or a closed relay, and both are recorded rather than returned.
+// Whoever published was told its event was delivered, and it was.
+func (r *Relay) carry(ctx context.Context, e Event) {
+	if err := r.Publish(ctx, e); err != nil {
+		r.log.ErrorContext(ctx, "joaju: an event delivered to this instance's connections was not handed to the fleet",
+			"instance", string(r.id), "tenant", e.Channel.Tenant(), "channel", e.Channel.Requested(),
+			"event", e.Name, "error", err)
+	}
 }
 
 // Close stops every subscription and waits for them.
@@ -722,7 +760,15 @@ func (r *Relay) listen(ctx context.Context, topic string, ch Channel) {
 // Delivery is [Channel.Broadcast] and not [Channel.BroadcastToAll], because the
 // exclusion the publisher asked for is fleet-wide: a publish through the events
 // API names a socket that may be held anywhere, and this instance is where it
-// might be.
+// might be. A client event names the socket that sent it, which this instance
+// does not hold, so everybody here receives it -- the sender is not among them.
+//
+// [relayMessage.UserID] is carried into the event as it arrived, and it is the
+// only field here that is read off the wire and used. It is a label and not
+// authority: what a receiver does with it is draw a name beside a typing
+// indicator, and nothing is reachable through it. The Grant, the tenant and the
+// channel all come from the subscription this instance already holds, and no
+// Grant is minted from any of these bytes.
 func (r *Relay) deliver(ch Channel, name ChannelName, payload string) {
 	// A message arriving is proof the bus is reachable, and it is the only
 	// proof a subscriber ever gets -- Bus.Subscribe reports the connection by
@@ -759,6 +805,7 @@ func (r *Relay) deliver(ch Channel, name ChannelName, payload string) {
 		Channel: name,
 		Data:    message.Data,
 		Socket:  message.Socket,
+		UserID:  message.UserID,
 	}
 	if err := ch.Broadcast(r.root, event); err != nil {
 		r.log.Error("joaju: the relay could not deliver a relayed message to this instance's connections",
@@ -1341,27 +1388,24 @@ func (b relayedBroker) Remove(ctx context.Context, g auth.Grant, name ChannelNam
 	return b.relay.Leave(name)
 }
 
-// carry hands the fleet an event this instance has already delivered, and is the
-// outbound half of horizontal scaling.
+// carry hands the fleet an event the events API published here, and is the
+// outbound half of horizontal scaling for that half of the server.
 //
 // It is called by [Server.publish] after [Channel.Broadcast] and never instead
 // of it, which is the order [Relay] describes: the sockets here were served by
-// the broadcast, and this is only about the instances holding the others.
+// the broadcast, and this is only about the instances holding the others. The
+// other way out is [pusher.carry], which is a frame off a socket rather than a
+// request, and both end in [Relay.carry].
 //
-// Nothing it does can fail the request that caused it. [Relay.Publish] answers a
-// bus it cannot reach with nil -- what an outage costs is reach, and the
-// delivery has already happened -- so an error here is a malformed event or a
-// closed relay, and both are recorded rather than returned. The caller was told
-// its event was delivered, and it was.
+// A server with no relay is a deployment of one, and there is nobody to carry to.
+// What becomes of a failure is [Relay.carry]'s to decide -- nothing here can fail
+// the request, and the caller was told its event was delivered, because it was.
 func (s *Server) carry(ctx context.Context, e Event) {
 	if s.relay == nil {
 		return
 	}
 
-	if err := s.relay.Publish(ctx, e); err != nil {
-		s.log.ErrorContext(ctx, "joaju: an event delivered to this instance's connections was not handed to the fleet",
-			"tenant", e.Channel.Tenant(), "channel", e.Channel.Requested(), "event", e.Name, "error", err)
-	}
+	s.relay.carry(ctx, e)
 }
 
 // tenantConnections is how many sockets this instance holds for one tenant, and
