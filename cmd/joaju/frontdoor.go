@@ -47,13 +47,13 @@ const (
 
 // signatureWindow is how far from now a signature may be stamped.
 //
-// Reverb checks no timestamp at all: it recomputes the HMAC and compares. That
-// is enough to prove the caller held the secret and says nothing about when, so
-// a publish captured off the wire replays for as long as the secret lives. The
-// window is the protocol's own answer -- Pusher documents auth_timestamp for
-// exactly this -- and ten minutes is wide enough that a container with a drifting
-// clock still starts and narrow enough that a captured request is stale by the
-// time anyone finds it.
+// Recomputing the HMAC and comparing is enough to prove the caller held the
+// secret and says nothing about when, so a publish captured off the wire
+// replays for as long as the secret lives. The window is the protocol's own
+// answer --
+// auth_timestamp exists for exactly this -- and ten minutes is wide enough that
+// a container with a drifting clock still starts and narrow enough that a
+// captured request is stale by the time anyone finds it.
 const signatureWindow = 10 * time.Minute
 
 // The identity a verified API caller acts as.
@@ -80,14 +80,14 @@ const (
 //	/up                the health check, which discloses nothing
 //
 // This is not a second way to prove who is calling, which [joaju.Server]'s own
-// documentation rules out. It is the first and only way in this deployment: the
-// framework's front door is not in front of this process, because there is no
-// framework in it.
+// documentation rules out. It is the first and only way in this deployment: no
+// host application stands in front of this process, so nothing else in it
+// authenticates anybody.
 //
 // What it does NOT do is take a tenant off the request. The tenant is the
 // process's, from [config.Tenant], and it is the same one for the signed caller
-// and the anonymous browser. A header naming a tenant would be RULE 14 undone by
-// a middleware.
+// and the anonymous browser. A header naming a tenant would be the tenant rule
+// undone by a middleware.
 type frontDoor struct {
 	// appKey is the key a signature has to name, and secret is what it has to be
 	// computed with.
@@ -219,9 +219,8 @@ func (d frontDoor) refuse(w http.ResponseWriter, r *http.Request, status int, me
 // from what arrived and recomputed here when there is a body, so a caller cannot
 // sign one digest and send another payload.
 //
-// Reverb drops appId, appKey and channelName here as well. It has to: they are
-// route parameters that its router merges into the query array. In Go they are
-// path values and never appear in a URL query, so there is nothing to drop.
+// appId, appKey and channelName are not in the query at all: they are path
+// values and never appear in a URL query, so there is nothing to drop.
 //
 // The digest is MD5 because the protocol says MD5. It is not being trusted as a
 // hash function on its own -- it is inside an HMAC-SHA256 over the whole string

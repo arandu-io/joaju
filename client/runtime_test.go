@@ -74,7 +74,7 @@ func findJSRuntime(t *testing.T) jsRuntime {
 // a .js file as CommonJS or as an ES module -- a question that has a different
 // answer in each of them and that a package.json would be the usual way to
 // settle. There is no package.json in this repository and there is not going to
-// be one (RULE 13).
+// be one.
 func (r jsRuntime) run(t *testing.T, environment []string, parts ...[]byte) (string, error) {
 	t.Helper()
 

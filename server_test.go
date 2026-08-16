@@ -19,8 +19,8 @@ import (
 	"github.com/arandu-io/joaju/ws"
 )
 
-// The application this file's server is. One server is one application
-// (ADR 0052), so these are values and not a lookup.
+// The application this file's server is. One server is one application, so
+// these are values and not a lookup.
 const (
 	serverAppID  = "app-1"
 	serverAppKey = "key-1"
@@ -104,7 +104,7 @@ func (c *serverChannel) events() []joaju.Event {
 }
 
 // serverBroker is a Broker over a map, which records every Grant it was handed
-// so that a test can assert RULE 17 was satisfied and not merely satisfiable.
+// so that a test can assert a policy ran and not merely that one could have.
 type serverBroker struct {
 	mu       sync.Mutex
 	channels map[string]*serverChannel
@@ -530,7 +530,7 @@ func TestServerRefusesTheChannelListWhenThePolicyDoes(t *testing.T) {
 
 	status, _ := f.get(t, "/apps/"+serverAppID+"/channels")
 	if status != http.StatusForbidden {
-		t.Fatalf("listing channels answered %d, want %d: listing is a read, and RULE 17 has no exception for reads", status, http.StatusForbidden)
+		t.Fatalf("listing channels answered %d, want %d: listing is a read, and a read is authorized exactly like a write", status, http.StatusForbidden)
 	}
 }
 
@@ -997,10 +997,10 @@ func (f *serverFixture) waitFor(t *testing.T, frame string) []string {
 	}
 }
 
-// Past the limit the client is told 4301 and keeps its socket. Reverb closes it
-// too when terminate_on_limit is set, and that setting is not here: a refusal
-// that answers two ways is two behaviours to explain (RULE 9), and the client a
-// limit is aimed at is the one worth keeping addressable.
+// Past the limit the client is told 4301 and keeps its socket. There is no
+// setting that closes it instead: a refusal that answers two ways is two
+// behaviours to explain, and the client a limit is aimed at is the one worth
+// keeping addressable.
 func TestServerRefusesTheFramesPastTheSocketsRateLimit(t *testing.T) {
 	const limit = 4
 	f := newServerFixture(t, joaju.ServerConfig{MaxMessagesPerSecond: limit})

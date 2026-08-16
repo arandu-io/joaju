@@ -70,7 +70,7 @@ func (p connectPolicy) Can(_ context.Context, s auth.Subject, a auth.Action, h j
 
 // subscriptionPolicy decides who may hear one channel, and is the second of the
 // two decisions. It runs for every channel, on every subscription, and on every
-// API route that names one, because subscribing is a read and RULE 17 opens no
+// API route that names one, because subscribing is a read and there is no
 // exception for reads.
 //
 // # What it decides on
@@ -94,12 +94,10 @@ func (p connectPolicy) Can(_ context.Context, s auth.Subject, a auth.Action, h j
 // no front door: nothing else in it identifies a browser, so there is no first
 // mechanism for this to compete with. And it stays evidence rather than
 // authority -- the signature allows nothing on its own, the tenant is the
-// process's and comes off the Grant either way (RULE 14), and this policy is
-// still what says yes.
+// process's and comes off the Grant either way, and this policy is still what
+// says yes.
 //
-// It is the same division Reverb reaches by the opposite route: there the socket
-// server is always separate and the application always signs for it over HTTP;
-// here an application that holds the server decides directly, and only a process
+// So an application that holds the server decides directly, and only a process
 // standing alone falls back to the signature.
 type subscriptionPolicy struct {
 	// tenant is the one this process serves, checked again here: a Grant issued
@@ -185,7 +183,7 @@ func (p subscriptionPolicy) verify(sub joaju.Subscription) error {
 //
 // The channel is [joaju.ChannelName.Requested] and never its String: the client
 // signed the name it sent, and the tenant this process scoped it to is neither
-// something it knows nor something it was allowed to choose (RULE 14).
+// something it knows nor something it was allowed to choose.
 //
 // The presence data is appended as it arrived and is not re-encoded. It is
 // already the exact bytes of the frame's channel_data -- see

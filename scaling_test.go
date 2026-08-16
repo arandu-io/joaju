@@ -711,8 +711,8 @@ func TestRelayRefusesAnEventItCannotAddress(t *testing.T) {
 	}
 }
 
-// The application every server in this file is. One server is one application
-// (ADR 0052), so these are values and not a lookup.
+// The application every server in this file is. One server is one application,
+// so these are values and not a lookup.
 const (
 	fleetTestAppID  = "app-1"
 	fleetTestAppKey = "key-1"
@@ -1282,7 +1282,7 @@ func TestADegradedInstanceAnswersItsMetricsRoutesFromItsOwnState(t *testing.T) {
 
 	// No bus is the degradation that cannot recover, and an instance whose
 	// Redis is down is in the same state: [Relay.Degraded] is one flag and
-	// there is no third answer (RULE 9).
+	// there is no third answer.
 	//
 	// The timeout is an hour. If a degraded instance asked the fleet and waited
 	// for it, this test would not finish.

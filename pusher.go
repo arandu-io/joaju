@@ -37,8 +37,8 @@ const ClientEventPrefix = "client-"
 // 4199 means come back after a backoff, 4200 to 4299 means come back now.
 type ErrorCode int
 
-// The codes this server sends. They are the ones laravel/reverb spells, kept at
-// the same numbers because a client that already handles Reverb handles these.
+// The codes this server sends. The numbers are the protocol's, so a client that
+// already branches on them branches on these.
 const (
 	// CodeOverQuota is 4004: too many sockets are open.
 	CodeOverQuota ErrorCode = 4004
@@ -68,8 +68,7 @@ const (
 type ProtocolError struct {
 	// Code is the number the client branches on.
 	Code ErrorCode
-	// Message is the sentence the client may print. It is fixed per code, and
-	// is Reverb's wording where Reverb has one.
+	// Message is the sentence the client may print. It is fixed per code.
 	Message string
 }
 
@@ -89,8 +88,8 @@ func (e ProtocolError) Frame() Frame {
 	return Frame{Event: EventError, Data: data}
 }
 
-// The refusals this package sends, with the wording laravel/reverb uses so that
-// a client's own message table keeps matching.
+// The refusals this package sends, with the wording the protocol's clients
+// already carry in their own message tables.
 var (
 	// ErrOverQuota is 4004, and is what a server past its connection limit
 	// answers a new socket.
@@ -108,7 +107,7 @@ var (
 	// [SubscriptionPolicy] guarded. See [ClientEvents].
 	ErrClientEventChannel = ProtocolError{Code: CodeUnauthorized, Message: "Client event rejected - only supported on private and presence channels"}
 	// ErrInvalidMessage is 4200, and is what anything unreadable becomes. It is
-	// also the answer to an unknown event name, which is Reverb's.
+	// also the answer to an unknown event name.
 	ErrInvalidMessage = ProtocolError{Code: CodeInvalidMessage, Message: "Invalid message format"}
 	// ErrRateLimited is 4301: the client is sending faster than it may.
 	ErrRateLimited = ProtocolError{Code: CodeRateLimited, Message: "Rate limit exceeded"}
@@ -193,7 +192,7 @@ func (f Frame) MarshalJSON() ([]byte, error) {
 
 	// data is a pointer so that omitempty can tell "no data" from "the empty
 	// string", which are different frames: pusher:pong carries no data field at
-	// all, and array_filter is how Reverb drops it.
+	// all.
 	wire := struct {
 		Event   string  `json:"event"`
 		Data    *string `json:"data,omitempty"`
@@ -221,9 +220,8 @@ func (f Frame) MarshalJSON() ([]byte, error) {
 // The field arrives either way and both are legal: pusher-js sends the data of
 // pusher:subscribe as an object, and sends the data of a client event as a
 // string containing JSON. A string whose contents are not JSON stays the string
-// it is -- which is the same rule Reverb applies, and it means a client that
-// sends the data "123" is heard as the number 123. That ambiguity is the
-// protocol's, and matching it is the point.
+// it is, which means a client that sends the data "123" is heard as the number
+// 123. That ambiguity is the protocol's, and matching it is the point.
 func (f *Frame) UnmarshalJSON(b []byte) error {
 	var wire struct {
 		Event   string          `json:"event"`
@@ -366,8 +364,7 @@ func Pong() Frame { return Frame{Event: EventPong} }
 //
 // data is empty on every kind of channel but a presence one, and it still goes
 // out as an object: an internal frame always carries {} rather than no data
-// field, because Reverb's json_encode((object) $data) always produces one and a
-// client that finds the field missing has nothing to parse.
+// field, because a client that finds the field missing has nothing to parse.
 func SubscriptionSucceeded(name ChannelName, data map[string]any) (Frame, error) {
 	if name.IsZero() {
 		return Frame{}, errors.New("joaju: a subscription confirmation needs a channel")
@@ -468,15 +465,14 @@ type SubscribeRequest struct {
 	// does not verify it. It is carried to [Subscription.Auth], where a
 	// [SubscriptionPolicy] may.
 	//
-	// In Pusher, and so in Reverb, this string is the whole authorization: the
+	// In the Pusher protocol this string is the whole authorization: the
 	// application signs "socket_id:channel" with the shared secret over a
 	// separate HTTP round trip, and the socket server checks the HMAC. That is
-	// what nothing here does, and the reason still stands where it was written.
-	// In a mounted application the subject on the Grant came through the
-	// framework's front door, and a signature that could also allow a
-	// subscription would be exactly the second mechanism RULE 9 forbids --
-	// particularly this one, which allows a channel without ever naming a
-	// tenant.
+	// what nothing here does. In a mounted application the subject on the Grant
+	// came through the host application's own front door, and a signature that
+	// could also allow a subscription would be a second mechanism for one
+	// decision -- particularly this one, which allows a channel without ever
+	// naming a tenant.
 	//
 	// What is different is who is asked. The signature travels as evidence
 	// rather than as authority: it allows nothing by itself, it builds no
@@ -546,8 +542,8 @@ func (f Frame) Unsubscribe() (string, error) {
 // when it offered none.
 //
 // It accepts a user_id that arrived as a number as well as one that arrived as
-// a string, because the clients send both and Reverb casts. The number is kept
-// as it was written rather than parsed and reprinted, so 007 stays 007.
+// a string, because the clients send both. The number is kept as it was written
+// rather than parsed and reprinted, so 007 stays 007.
 //
 // What it returns is a claim. A client sends its own channel_data, so the
 // user_id in it is the one the client typed: a [SubscriptionPolicy] compares it
@@ -611,41 +607,35 @@ func memberID(raw json.RawMessage) (string, error) {
 //   - nothing on the server sees the message go past, so there is no audit
 //     trail, no validation and no rate limit that is not built here.
 //
-// So it is off unless something turns it on, which is Pusher's own default and
-// Reverb's. When it is on, [ClientEvents.Accept] still holds two lines that do
-// not move: the channel has to be one a policy guarded, and the sender has to
-// be subscribed to it.
+// So it is off unless something turns it on, which is the protocol's default
+// too. When it is on, [ClientEvents.Accept] still holds two lines that do not
+// move: the channel has to be one a policy guarded, and the sender has to be
+// subscribed to it.
 //
 // # Why there are two states and not three
 //
-// Reverb spells the same switch as accept_client_events_from, and it reads three
-// values: "members", "all", and anything else for off. The two here are its off
-// and its "members". The third was measured against this file rather than
-// declined on principle, and what it changes there is three things -- two of
-// which cannot exist here, and the third of which is the authorization:
+// The state this deliberately does not have is a third one that relays a client
+// event without requiring the sender to be a member, forwarding its frame
+// verbatim. It would change three things -- two of which cannot exist here, and
+// the third of which is the authorization:
 //
-//   - under "all" the sender need not be on the channel. There is no frame a
+//   - the sender would not have to be on the channel. There is no frame a
 //     client can send that reaches a [Channel] it did not subscribe to: the
 //     caller of Accept is handed the seat the socket already holds, and nothing
 //     on that path asks a [Broker] for a channel. Adding the lookup would be a
-//     socket publishing into a private channel no [SubscriptionPolicy] ever saw
-//     (RULE 17), which is the leak this repository exists not to have;
-//   - under "members" Reverb rebuilds the relayed payload out of three named
-//     fields, because under "all" it forwards the sender's frame verbatim --
-//     every extra top-level key it carried included, a user_id the sender wrote
-//     for itself among them. Here a relayed frame is built field by field out of
-//     an [Event], and there is no verbatim path for a setting to pick;
-//   - under "all" no user_id is stamped. Here it comes off the channel's record
-//     of the seat, so the only way not to have one is not to have a seat, which
-//     is the first point again.
+//     socket publishing into a private channel no [SubscriptionPolicy] ever
+//     saw, which is the leak this repository exists not to have;
+//   - the relayed payload would be the sender's frame verbatim -- every extra
+//     top-level key it carried included, a user_id the sender wrote for itself
+//     among them. Here a relayed frame is built field by field out of an
+//     [Event], and there is no verbatim path for a setting to pick;
+//   - no user_id would be stamped. Here it comes off the channel's record of
+//     the seat, so the only way not to have one is not to have a seat, which is
+//     the first point again.
 //
 // So the setting would be a name for the membership check with a value that
-// turns it off, and one more way to relay a client event (RULE 9) -- the looser
-// of two paths being the one that ends up in production. Reverb's own two
-// defaults already disagree about which value it is: config/reverb.php:90
-// publishes "members" and ConfigApplicationProvider falls back to "all" when the
-// key is absent. A switch that is one thing in the config file and another in
-// the code is a switch nobody knows the state of.
+// turns it off, and one more way to relay a client event -- the looser of two
+// paths being the one that ends up in production.
 type ClientEvents bool
 
 // The two states of [ClientEvents], named so a call site reads as a decision

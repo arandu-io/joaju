@@ -17,15 +17,15 @@ import (
 // from broadcasting.ChannelJoin on purpose. This one answers whether a subject
 // may hold a socket at all; the other answers whether they may hear one
 // channel, and it is asked again for every channel they name. Issuing one Grant
-// for both would mean the per-channel policy never runs, which is RULE 17
-// undone by a constant.
+// for both would mean the per-channel policy never runs: one constant undoing
+// every subscription decision.
 const Connect auth.Action = "joaju.connect"
 
 // The prefixes a Pusher cache channel carries.
 //
 // broadcasting.PrivateChannelPrefix and broadcasting.PresenceChannelPrefix
 // already name the other two, and this package uses those rather than spelling
-// them a second time (RULE 9). Only these three are new, because the SSE fanout
+// them a second time. Only these three are new, because the SSE fanout
 // hesape/broadcasting was written for has no cache channel.
 //
 // A cache channel replays the last event it carried to whoever subscribes next,
@@ -55,10 +55,9 @@ const (
 
 // The protocol event names.
 //
-// The four the Reverb clone spells are [EventConnectionEstablished],
-// [EventError], [EventMemberAdded] and [EventMemberRemoved]. The rest are the
-// Pusher protocol's, and are here so that the two ends of this repository --
-// the code that reads a frame and the code that writes one -- name them once.
+// They are the Pusher protocol's, and are here so that the two ends of this
+// repository -- the code that reads a frame and the code that writes one --
+// name them once.
 const (
 	// EventConnectionEstablished carries the [SocketID] to a client that has
 	// just connected. It is the first frame the server sends, and the client
@@ -96,6 +95,17 @@ var ErrNoChannel = errors.New("joaju: no such channel")
 // from a failure keeps doing so.
 var ErrNoGrant = fmt.Errorf("%w: joaju: no grant", auth.ErrForbidden)
 
+// ErrConnectionLimit is the tenant already holding as many sockets as
+// [ServerConfig.MaxConnections] allows.
+//
+// It is refused AFTER the upgrade, not before, and that is on purpose: the
+// client is a websocket by then, so it can be told why in a protocol frame it
+// understands instead of getting an HTTP status it has no handler for.
+//
+// It is not an auth.ErrForbidden. Nothing was refused on authority -- the same
+// client with the same Grant is admitted the moment somebody disconnects.
+var ErrConnectionLimit = errors.New("joaju: this tenant is holding as many connections as it may")
+
 // ErrWrongTenant is what a [Broker] answers when the Grant it was handed and
 // the [ChannelName] it was handed disagree about whose channel it is.
 //
@@ -103,18 +113,6 @@ var ErrNoGrant = fmt.Errorf("%w: joaju: no grant", auth.ErrForbidden)
 // Grant. It can happen when a name built under one Grant is used with another,
 // which is the mistake worth a distinct error: both values are valid, and
 // nothing but this comparison notices.
-// ErrConnectionLimit is the tenant already holding as many sockets as
-// [ServerConfig.MaxConnections] allows.
-//
-// It is refused AFTER the upgrade, not before, and that is on purpose: the
-// client is a websocket by then, so it can be told why in a protocol frame it
-// understands instead of getting an HTTP status it has no handler for. Reverb
-// answers the same way, with ConnectionLimitExceeded.
-//
-// It is not an auth.ErrForbidden. Nothing was refused on authority -- the same
-// client with the same Grant is admitted the moment somebody disconnects.
-var ErrConnectionLimit = errors.New("joaju: this tenant is holding as many connections as it may")
-
 var ErrWrongTenant = fmt.Errorf("%w: joaju: the grant and the channel belong to different tenants", auth.ErrForbidden)
 
 // SocketID identifies one open socket, and is the id the protocol calls
@@ -134,17 +132,16 @@ type SocketID string
 // and it is the only place the prefixes are compared.
 type ChannelType uint8
 
-// The six channel kinds, which are Reverb's six Channel classes.
+// The six channel kinds.
 //
-// Reverb's Channels directory holds a seventh file, ChannelBroker, which is not
-// a kind of channel: it is the rule that picks one, and here that rule is
-// [ChannelName.Type] and the thing that hands channels out is [Broker].
+// Which one a name denotes is [ChannelName.Type]'s answer, read off the name's
+// prefix; the channels themselves are held by a [Broker].
 const (
-	// PublicChannel is Reverb's Channel: no prefix, no authorization, anyone
-	// connected may listen.
+	// PublicChannel has no prefix: no authorization, anyone connected may
+	// listen.
 	//
-	// It still cannot cross a tenant. Every name carries one (RULE 14), so
-	// "public" means public within one customer's namespace and never wider.
+	// It still cannot cross a tenant. Every name carries one, so "public"
+	// means public within one customer's namespace and never wider.
 	PublicChannel ChannelType = iota
 	// PrivateChannel is "private-": a subscription a [SubscriptionPolicy] has
 	// to allow.
@@ -186,10 +183,9 @@ func (t ChannelType) String() string {
 // Guarded reports whether a subscription to this kind of channel has to be
 // authorized by a [SubscriptionPolicy].
 //
-// It is Reverb's UsePusherChannelConventions::isGuardedChannel, and it answers
-// no for the public kinds -- which does not make them reachable across a
-// tenant, because the tenant is in every name and comes from the Grant that
-// built it.
+// It answers no for the public kinds -- which does not make them reachable
+// across a tenant, because the tenant is in every name and comes from the Grant
+// that built it.
 func (t ChannelType) Guarded() bool {
 	switch t {
 	case PrivateChannel, PresenceChannel, PrivateCacheChannel, PresenceCacheChannel:
@@ -220,9 +216,8 @@ func (t ChannelType) Cache() bool {
 //
 // It has only unexported fields, so it cannot be written as a struct literal
 // with a tenant somebody chose. [NewChannelName] is the way to one, and it
-// reads the tenant off an auth.Grant -- which is RULE 14 expressed as a type,
-// the same shape auth.Grant itself uses to make an authorization decision
-// unforgeable.
+// reads the tenant off an auth.Grant -- the same shape auth.Grant itself uses
+// to make an authorization decision unforgeable.
 //
 // It has two string forms and they are not interchangeable:
 //
@@ -253,7 +248,7 @@ type ChannelName struct {
 // Both refusals are broadcasting.RequestedChannel and
 // broadcasting.TenantChannel doing the work, because the SSE fanout already
 // authenticates channel names and two definitions of a valid one are how the
-// looser of the two gets found (RULE 9).
+// looser of the two gets found.
 func NewChannelName(g auth.Grant, requested string) (ChannelName, error) {
 	c, err := broadcasting.RequestedChannel(requested)
 	if err != nil {
@@ -297,7 +292,7 @@ func (n ChannelName) String() string {
 // IsZero reports whether this is the zero value, which is not a channel.
 func (n ChannelName) IsZero() bool { return n.tenant == "" || n.requested == "" }
 
-// Type reads the kind off the prefix, which is Reverb's ChannelBroker::create.
+// Type reads the kind off the prefix.
 //
 // The order matters and is the reason this is one function: "private-cache-"
 // also begins with "private-", so the compound prefixes are tested first. Two
@@ -306,10 +301,9 @@ func (n ChannelName) IsZero() bool { return n.tenant == "" || n.requested == "" 
 //
 // It reads [ChannelName.Requested] and not [ChannelName.String], because the
 // prefix is at the front of the name the client sent and the published name has
-// the tenant in front of it. That exact mistake is on record in
-// hesape/broadcasting: IsGuardedChannel asked the published name whether it
-// began with "private-", so it answered false for every private channel it
-// existed to protect.
+// the tenant in front of it. Asking the published name instead is a mistake
+// with a shape: "acme:private-orders.17" does not begin with "private-", so
+// every private channel reports itself unguarded.
 func (n ChannelName) Type() ChannelType {
 	switch name := n.requested; {
 	case strings.HasPrefix(name, PrivateCacheChannelPrefix):
@@ -333,16 +327,14 @@ func (n ChannelName) Type() ChannelType {
 // subpackage implements it over a real socket, and a test implements it over a
 // slice.
 //
-// It is named for what it is in Go terms rather than after Reverb's names for
-// the same two operations, which are methods on the Connection class itself --
-// send() and terminate(). Splitting them out is what lets [Connection] be a
+// Splitting the two write operations out of [Connection] is what lets it be a
 // struct with a constructor that cannot be bypassed: an interface cannot have
 // one.
 type Sink interface {
 	// Send writes one message. The message is a complete protocol frame,
 	// already encoded.
 	Send(ctx context.Context, message []byte) error
-	// Terminate closes the socket. It is Reverb's Connection::terminate.
+	// Terminate closes the socket.
 	Terminate(ctx context.Context) error
 }
 
@@ -385,7 +377,7 @@ func NewConnection(g auth.Grant, id SocketID, sink Sink) (*Connection, error) {
 	return &Connection{id: id, grant: g, sink: sink}, nil
 }
 
-// ID is the socket id, which is Reverb's Connection::id.
+// ID is the socket id.
 func (c *Connection) ID() SocketID { return c.id }
 
 // Subject is who this socket was authenticated as.
@@ -430,9 +422,8 @@ type Member struct {
 
 // Subscriber is one [Connection]'s membership of one [Channel].
 //
-// It is Reverb's ChannelConnection, which exists there for the same reason:
-// presence data belongs to the pair, not to the socket. One socket may be in a
-// presence channel as one member and in another as a different one.
+// Presence data belongs to the pair and not to the socket: one socket may be in
+// a presence channel as one member and in another as a different one.
 type Subscriber struct {
 	// Conn is the socket.
 	Conn *Connection
@@ -451,8 +442,8 @@ type Subscriber struct {
 //     [ChannelName.String]. The client asked for "private-orders.17" and that
 //     is the name it is answered about; the tenant is not its to see.
 //   - Data goes out as a JSON string containing JSON, which is what the Pusher
-//     protocol specifies and what Reverb's json_encode of the data field
-//     produces. It is held decoded here so that nothing double-encodes twice.
+//     protocol specifies. It is held decoded here so that nothing
+//     double-encodes twice.
 type Event struct {
 	// Name is the event name, and goes out in the frame's "event" field.
 	// [ProtocolPrefix] and [InternalPrefix] are reserved: an event a client
@@ -493,8 +484,8 @@ type Event struct {
 //
 // The origin is here rather than in configuration because refusing an origin is
 // a decision about who may connect, and this repository has one place where
-// those are made. Reverb keeps an allowed-origins list per application; a
-// policy answers the same question and answers it beside every other one.
+// those are made. An allowed-origins list in configuration answers the same
+// question; a policy answers it beside every other one.
 type Handshake struct {
 	// Socket is the id minted for this client.
 	Socket SocketID
@@ -539,10 +530,11 @@ type Subscription struct {
 	// leaves it out accepts a signature anybody who saw it can replay.
 	//
 	// A policy for a mounted application ignores it, and should. There the
-	// subject on the Grant arrived through the framework's front door, so a
-	// signature that could also allow a subscription would be the second
-	// mechanism RULE 9 forbids. Where there is no front door -- cmd/joaju is
-	// that process -- there is no first mechanism for it to be a second one to.
+	// subject on the Grant arrived through the host application's own front
+	// door, so a signature that could also allow a subscription would be a
+	// second mechanism for one decision. Where there is no front door --
+	// cmd/joaju is that process -- there is no first mechanism for it to be a
+	// second one to.
 	Auth string
 	// ChannelData is the presence data exactly as it arrived, and it is what
 	// the third part of the signed string above is.
@@ -558,8 +550,8 @@ type Subscription struct {
 // for [Connect].
 //
 // It is an alias and not a new interface because there is one way to authorize
-// in this ecosystem, and it is auth.Policy (RULE 9). The alias exists so the
-// resource type is named at the point the decision is described.
+// in this ecosystem, and it is auth.Policy. The alias exists so the resource
+// type is named at the point the decision is described.
 type ConnectPolicy = auth.Policy[Handshake]
 
 // SubscriptionPolicy decides whether a client may listen on a channel. Its
@@ -567,26 +559,21 @@ type ConnectPolicy = auth.Policy[Handshake]
 // already declares for the SSE fanout's half of the same question.
 //
 // It runs for every channel, on every subscription, including a resubscription
-// after a reconnect. Subscribing is a read, and RULE 17 has no exception for
+// after a reconnect. Subscribing is a read, and there is no exception for
 // reads: a channel a policy never saw is a channel whose contents nobody
 // decided anyone could have.
 type SubscriptionPolicy = auth.Policy[Subscription]
 
 // Channel is a group of sockets that receive the same events.
 //
-// The method names are Reverb's Channel class, so that the six kinds of channel
-// read as what they are there. The differences are three:
+// Subscribe takes a context and an auth.Grant rather than a signature it
+// verifies itself: a subscription that a Policy did not decide is the leak this
+// repository exists not to have, and a Grant in the signature is how the
+// compiler asks for the decision.
 //
-//   - Subscribe takes a context and an auth.Grant. Reverb's takes a connection
-//     and two optional strings, one of which is a signature it verifies itself.
-//     A subscription that a Policy did not decide is the leak this repository
-//     exists not to have, and a Grant in the signature is how the compiler asks
-//     for the decision.
-//   - Find takes a [SocketID], and so covers Reverb's find() and findById()
-//     both.
-//   - The reads carry no context and return no error, because the sockets in a
-//     channel are the ones this process holds and looking at them is not I/O.
-//     Everything that writes to a socket does both.
+// The reads carry no context and return no error, because the sockets in a
+// channel are the ones this process holds and looking at them is not I/O.
+// Everything that writes to a socket does both.
 //
 // Implementations are safe for concurrent use. One connection is one goroutine
 // and a channel is shared between all of them, so the alternative is a lock
@@ -597,8 +584,8 @@ type Channel interface {
 
 	// Connections is every current subscriber.
 	//
-	// Reverb returns a map keyed by connection id; this returns a slice,
-	// because every caller of it iterates. [Channel.Find] is the keyed lookup.
+	// It is a slice and not a map keyed by socket id, because every caller of
+	// it iterates. [Channel.Find] is the keyed lookup.
 	Connections() []Subscriber
 
 	// Find is the subscriber on this channel with the given socket id, if it
@@ -642,7 +629,7 @@ type Channel interface {
 	// Data is what [EventSubscriptionSucceeded] carries to a new subscriber.
 	//
 	// It is empty on every kind of channel but a presence one, where it is
-	// Reverb's presence block: {"presence": {"count": n, "ids": [...],
+	// the protocol's presence block: {"presence": {"count": n, "ids": [...],
 	// "hash": {...}}}. It stays a map because it is a payload on its way to
 	// JSON and nothing in this repository reads a field out of it.
 	Data() map[string]any
@@ -650,14 +637,12 @@ type Channel interface {
 
 // Broker holds the channels and hands them out. It is the only way to one.
 //
-// It is Reverb's ChannelManager and its ChannelBroker at once. Those are two
-// classes there because one picks the subclass by prefix and the other keeps
-// the instances; here picking is [ChannelName.Type] and keeping is this, and a
-// caller that could get a channel from either of two places would have two
-// answers to compare (RULE 9).
+// Picking which kind of channel a name denotes is [ChannelName.Type]; keeping
+// the instances is this. A caller that could get a channel from either of two
+// places would have two answers to compare.
 //
-// Every method takes an auth.Grant, and that is RULE 17 rather than ceremony.
-// The metrics routes -- the channel list, one channel, its members -- are reads
+// Every method takes an auth.Grant, and that is not ceremony. The metrics
+// routes -- the channel list, one channel, its members -- are reads
 // of who is talking to whom, and a read with no policy behind it is a tenant
 // boundary that exists everywhere except the dashboard.
 //
@@ -679,7 +664,7 @@ type Broker interface {
 	FindOrCreate(ctx context.Context, g auth.Grant, name ChannelName) (Channel, error)
 
 	// Remove drops the channel. An implementation calls it when the last
-	// subscriber leaves, which is what Reverb's Channel::unsubscribe does.
+	// subscriber leaves.
 	Remove(ctx context.Context, g auth.Grant, name ChannelName) error
 
 	// All is every channel in the Grant's tenant, and never another tenant's.

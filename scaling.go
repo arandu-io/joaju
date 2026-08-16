@@ -20,7 +20,7 @@ import (
 // subscription again after the one it had was lost.
 //
 // It is a constant and not a knob because a knob would be a second way to
-// answer "how fast does this reconnect" (RULE 9). A second is short enough that
+// answer "how fast does this reconnect". A second is short enough that
 // a Redis restart costs one message and long enough that a Redis that is down
 // is not asked a thousand times a second by every instance at once.
 const DefaultRetryInterval = time.Second
@@ -87,14 +87,12 @@ type InstanceID string
 // Publish and Subscribe, signature for signature, so that a *connections.Connection
 // satisfies this by having been written -- there is no adapter to keep in step.
 //
-// It is declared here rather than imported for the reason the same shape is
-// declared in hesape's broadcasters package: github.com/arandu-io/hesape/redis
-// is a separate module, because the driver beneath it is a third-party
-// dependency and Go has no optional dependency (ADR 0048). Importing it would
-// put that driver in this repository's go.mod, and a graph with one entry in it
-// is what writing the ws subpackage bought (ADR 0052). Stating the contract and
-// letting the application pass its connection in costs nothing and keeps the
-// graph.
+// It is declared here rather than imported because
+// github.com/arandu-io/hesape/redis is a separate module: the driver beneath it
+// is a third-party dependency, and Go has no optional dependency. Importing it
+// would put that driver in this repository's go.mod, and the dependency graph
+// has one entry in it. Stating the contract and letting the application pass
+// its connection in costs nothing and keeps the graph.
 //
 // Publish and Subscribe both prefix the channel name with the connection's own
 // key prefix, on both sides, which is why nothing here compensates for it and
@@ -114,7 +112,7 @@ type Bus interface {
 // It is [TopicPrefix] followed by [ChannelName.String], so the tenant is in the
 // middle of it -- "joaju:acme:orders" and "joaju:globex:orders" are two topics,
 // and two customers who both called a channel "orders" never hear each other.
-// That is RULE 14 reaching the one place where a channel name leaves this
+// That is the tenant reaching the one place where a channel name leaves this
 // process, and it holds by construction: a [ChannelName] cannot be built
 // without a Grant to read the tenant off.
 //
@@ -191,7 +189,7 @@ type relayMessage struct {
 // four views of the same two numbers -- how many sockets, and who is on which
 // channel -- so four questions would be four payloads to keep in step, and the
 // route that got out of step would be the one nobody looks at until it is
-// wrong (RULE 9).
+// wrong.
 type fleetQuestion struct {
 	// Origin is who asked, and is where the answer is addressed:
 	// [MetricsReplyTopic] of this id.
@@ -200,7 +198,7 @@ type fleetQuestion struct {
 	// [Relay.newRequestID].
 	Request string `json:"request"`
 	// Tenant is whose numbers are being asked for, read off the Grant the route
-	// was authorized with (RULE 14).
+	// was authorized with.
 	//
 	// It is a FILTER on the instance that answers and never an authority: an
 	// answering instance compares it against the tenant its own channels and
@@ -258,8 +256,8 @@ type channelAnswer struct {
 // It holds what the fleet said and never what this instance knows. The local
 // half of every route is answered from the Broker under the Grant the route was
 // authorized with, exactly as it was before there was a fleet, and the two are
-// added at the point the reply is built (RULE 17: the local numbers keep coming
-// from a policy).
+// added at the point the reply is built, so the local numbers keep coming from
+// a policy.
 type fleetTally struct {
 	// connections is how many sockets the other instances hold for the tenant.
 	connections int
@@ -348,8 +346,9 @@ func (t *fleetTally) add(log *slog.Logger, mine InstanceID, tenant string, answe
 // because it is the whole of what a relay may disclose about its process, and
 // naming it is what keeps that list from growing by accident. Unexported so
 // that only this package can implement or call it: it reads without a Grant,
-// and the only reason that is not RULE 17 with a hole in it is that the tenant
-// it is given is an exact match against tenants the sockets already carried.
+// and the only reason that is not a hole in the authorization is that the
+// tenant it is given is an exact match against tenants the sockets already
+// carried.
 type fleetLocal interface {
 	// tenantConnections is how many sockets this instance holds for one tenant.
 	tenantConnections(tenant string) int
@@ -359,11 +358,10 @@ type fleetLocal interface {
 // other instances, and delivers what they received to this instance's
 // connections.
 //
-// It is the shape ADR 0052 settles on, and it is Reverb's: every server
-// publishes on Redis pub/sub, every server subscribes, and no server has to know
-// which of the others holds a given socket. One topic per channel per tenant --
-// see [Topic] -- so an instance receives only the traffic of channels it is
-// actually holding.
+// Every server publishes on Redis pub/sub, every server subscribes, and no
+// server has to know which of the others holds a given socket. One topic per
+// channel per tenant -- see [Topic] -- so an instance receives only the traffic
+// of channels it is actually holding.
 //
 // The flow of one message, and it is worth reading in order, because the local
 // delivery is not this type's job:
@@ -529,8 +527,8 @@ func (r *Relay) Degraded() bool { return r.degraded.Load() }
 // the tenant of ch's name, or [ErrWrongTenant]. That is the same Grant the
 // [SubscriptionPolicy] answered for the first subscriber, and asking for it here
 // is not ceremony: this is the call that opens a pipe from every other instance
-// into this channel, and a pipe nobody authorized is RULE 17 with a network in
-// the middle of it.
+// into this channel, and a pipe nobody authorized is an unauthorized read with
+// a network in the middle of it.
 //
 // It takes no context because it starts I/O rather than doing any -- the
 // subscription runs on the lifetime the relay was built with. It is idempotent:
@@ -683,7 +681,7 @@ func (r *Relay) Publish(ctx context.Context, e Event) error {
 // here: [Server.carry], for POST /apps/{appId}/events, and [pusher.carry], for a
 // client- frame off a socket. It is one function and not one per caller because
 // what to do about a failure is a decision rather than a line -- a second copy is
-// a second answer the first time one of them is changed (RULE 9).
+// a second answer the first time one of them is changed.
 //
 // Nothing it does can fail whatever caused it, which is why it answers nothing.
 // [Relay.Publish] answers a bus it cannot reach with nil -- what an outage costs
@@ -822,7 +820,7 @@ func (r *Relay) deliver(ch Channel, name ChannelName, payload string) {
 // the event; CompareAndSwap is what detects it, and the second caller in the
 // same outage says nothing.
 //
-// This is not a mode (RULE 9). There is one delivery path and one publish path,
+// This is not a mode. There is one delivery path and one publish path,
 // and degradation is those same paths reporting that the half of them which
 // reaches other instances is not answering.
 //
@@ -835,11 +833,11 @@ func (r *Relay) fail(operation string, name ChannelName, err error) {
 	// The log is written BEFORE the flag is published, and the order is the
 	// whole of this function's correctness.
 	//
-	// It used to be the other way round: CompareAndSwap first, then the log
-	// line. Anything watching Degraded saw true while the line was not written
-	// yet -- a window one log write wide, which is exactly long enough for
+	// The other order -- CompareAndSwap first, then the log line -- leaves
+	// anything watching Degraded seeing true while the line is not written
+	// yet: a window one log write wide, which is exactly long enough for
 	// somebody diagnosing an outage to read a degraded instance and find
-	// nothing saying why. The test that found it waits on Degraded and then
+	// nothing saying why. The test that covers it waits on Degraded and then
 	// reads the log, which is what an operator does.
 	//
 	// So: the transition is claimed under the mutex, the line is written, and
@@ -905,8 +903,8 @@ const fleetBacklog = 64
 //
 // wait is [ServerConfig.MetricsTimeout], and zero means [DefaultMetricsTimeout].
 //
-// A second server on one relay is refused. One process is one server (ADR 0052),
-// so a second one is a wiring mistake, and the mistake it would cause is two
+// A second server on one relay is refused. One process is one server, so a
+// second one is a wiring mistake, and the mistake it would cause is two
 // servers answering the fleet's questions as one instance -- which is the same
 // id twice, and the one thing [InstanceID] may not be.
 func (r *Relay) serve(local fleetLocal, wait time.Duration) error {
@@ -977,7 +975,7 @@ func (r *Relay) attend(ctx context.Context, topic, operation string, handle func
 // [Relay.deliver]'s for the same reason. The tenant in the question is used
 // ONLY as an equality test against the tenant a channel or a socket already
 // carries -- and those came off a Grant: a [ChannelName] cannot be built
-// without one (RULE 14), and [Relay.Join] refuses a channel whose tenant is not
+// without one, and [Relay.Join] refuses a channel whose tenant is not
 // the Grant's. Naming a tenant here therefore unlocks nothing. It narrows what
 // this instance says, and an instance holding none of that customer's traffic
 // answers with none.
@@ -1121,7 +1119,7 @@ func (r *Relay) collect(payload string) {
 // timeout.
 //
 // g is the Grant the route was authorized with, and the tenant of the question
-// is read off it and off nothing in the request (RULE 14). Nothing else is read
+// is read off it and off nothing in the request. Nothing else is read
 // off it: which action it was issued for is the route's business, and the four
 // metrics routes do not agree on one -- the count of sockets is authorized by
 // the [ConnectPolicy] and the three channel routes by the
@@ -1147,7 +1145,7 @@ func (r *Relay) collect(payload string) {
 // A degraded relay does not ask. The bus is what the question would travel on,
 // and an instance that cannot reach it answers out of its own Broker rather
 // than spending the timeout finding that out again on every request -- which is
-// [Relay.Degraded] doing what it is for, and not a third state (RULE 9).
+// [Relay.Degraded] doing what it is for, and not a third state.
 func (r *Relay) ask(ctx context.Context, g auth.Grant, channel string) fleetTally {
 	var tally fleetTally
 
@@ -1274,7 +1272,7 @@ func (r *Relay) newRequestID() string {
 // every implementation. [Broker] is an interface an application writes, and a
 // relay that had to be joined by hand would be joined by hand wrongly in exactly
 // one deployment -- where the symptom is a client hearing nothing, which from
-// inside a browser is indistinguishable from a quiet channel (RULE 9).
+// inside a browser is indistinguishable from a quiet channel.
 //
 // [Broker.Find] and [Broker.All] are the embedded ones and are untouched,
 // because they read. A route that looks a channel up is not a socket listening
@@ -1454,7 +1452,7 @@ func (s *Server) fleet(ctx context.Context, g auth.Grant, channel string) fleetT
 // on one this instance has never seen.
 //
 // The kind is read through [ChannelName.Type], which is the one place a
-// prefix is compared (RULE 9), and the name is built under the asking Grant --
+// prefix is compared, and the name is built under the asking Grant --
 // so the [ChannelName] it goes through carries this request's own tenant and
 // never one that arrived with an answer. A name the fleet answered with that
 // cannot be a name here is not a presence channel and is not anything else

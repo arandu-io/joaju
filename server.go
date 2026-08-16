@@ -43,9 +43,8 @@ const (
 	// Zero in [ServerConfig] means this, and this is not "no limit": a server
 	// that accepts sockets until the file descriptors run out stops answering
 	// for EVERY tenant, and the one that exhausted them is not necessarily the
-	// one that notices. Reverb calls the refusal ConnectionLimitExceeded and
-	// leaves the number to configuration; the number here is a default that a
-	// deployment raises knowingly.
+	// one that notices. The number here is a default that a deployment raises
+	// knowingly.
 	DefaultMaxConnections = 10_000
 	// DefaultWriteTimeout is how long one frame may take to reach the client.
 	DefaultWriteTimeout = 10 * time.Second
@@ -63,15 +62,14 @@ const (
 // The server owns the socket -- the upgrade, the two goroutines, the deadlines,
 // the registry -- and owns no part of the Pusher protocol. It sends no frame of
 // its own, not even [EventConnectionEstablished], because a second place that
-// builds a frame is a second answer to what a frame looks like (RULE 9). The
-// one it does put on the wire is a refusal this package already declared and it
-// only encodes -- [ErrRateLimited], when [ServerConfig.MaxMessagesPerSecond] is
-// what dropped the frame -- because that limit is the socket's and a Protocol
-// cannot answer for a frame it was never handed.
+// builds a frame is a second answer to what a frame looks like. The one it
+// does put on the wire is a refusal this package already declared and only
+// encodes -- [ErrRateLimited], when [ServerConfig.MaxMessagesPerSecond] is what
+// dropped the frame -- because that limit is the socket's and a Protocol cannot
+// answer for a frame it was never handed.
 //
-// The three methods are Reverb's Protocols\Pusher\Server: open(), message() and
-// close(). Its fourth, error(), is not here -- in Go the error comes back from
-// the call that failed.
+// There are three methods and no fourth for reporting an error: the error comes
+// back from the call that failed.
 //
 // An implementation is called from the one goroutine that reads a given socket,
 // so calls concerning one [Connection] are ordered and never concurrent with
@@ -106,15 +104,15 @@ type Protocol interface {
 // Everything without a default is required, and [NewServer] refuses a config
 // missing one rather than filling in something safe-looking: a server with no
 // [ConnectPolicy] would accept every socket, and a nil policy is exactly the
-// mistake RULE 17 exists to make impossible.
+// mistake this shape exists to make impossible.
 type ServerConfig struct {
 	// AppID is the {appId} the API routes carry, and AppKey is the {appKey} the
 	// socket route carries. A request naming another app is answered 404.
 	//
-	// One server is one application (ADR 0052): Reverb serves several from one
-	// instance because hosting PHP is expensive, and a Go binary is a process.
-	// These are here so the route table is Reverb's and the names in a client's
-	// configuration mean what they mean everywhere else.
+	// One server is one application: a Go binary is a process, and running one
+	// per application costs nothing that would justify multiplexing them.
+	// These are here so the names in a client's configuration mean what they
+	// mean everywhere else.
 	AppID  string
 	AppKey string
 
@@ -171,8 +169,8 @@ type ServerConfig struct {
 	// [DefaultMaxConnections]; a negative number means no limit, and saying so
 	// takes writing -1 rather than leaving a field out.
 	//
-	// Per tenant and not per server, for the reason RULE 14 gives: a global
-	// limit lets one customer's traffic refuse another customer's connections,
+	// Per tenant and not per server: a global limit lets one customer's
+	// traffic refuse another customer's connections,
 	// which is a denial of service one of them did not cause and cannot see.
 	MaxConnections int
 
@@ -195,7 +193,7 @@ type ServerConfig struct {
 	//
 	// A frame past the limit is answered with [ErrRateLimited] and dropped, and
 	// the socket stays open. There is no second setting that closes it instead:
-	// two ways to answer one refusal is two behaviours to explain (RULE 9), and
+	// two ways to answer one refusal is two behaviours to explain, and
 	// the client that a limit is aimed at is the one worth keeping addressable.
 	MaxMessagesPerSecond int
 
@@ -217,11 +215,10 @@ type ServerConfig struct {
 // and this server does not authenticate anybody: it reads the subject the
 // middleware put there and asks a Policy about it.
 //
-// That is the one real difference from Reverb's API routes, which verify an
-// app_secret HMAC on every call. Reverb has to, because it is a separate
-// process with no session to read. Here the request has already been through
-// the framework's front door, and a second credential of its own would be a
-// second way to prove who is calling (RULE 9).
+// So the API routes verify no app_secret HMAC of their own. A standalone socket
+// server has to, having no session to read; here the request has already been
+// through the host application's front door, and a second credential would be a
+// second way to prove who is calling.
 //
 // # The authorization shape, which every route follows
 //
@@ -230,7 +227,7 @@ type ServerConfig struct {
 //
 // Both run on the API routes and not only on the socket, because listing
 // channels, counting subscribers and reading a presence channel's members are
-// reads of who is talking to whom, and RULE 17 opens no exception for reads. A
+// reads of who is talking to whom, and there is no exception for reads. A
 // dashboard that lists channels without a policy is a tenant boundary that
 // holds everywhere except the dashboard.
 //
@@ -241,7 +238,7 @@ type ServerConfig struct {
 // the question it would answer is the one [Connect] already answers.
 //
 // The Connect Grant is also what a [ChannelName] on an API route is built from,
-// because a name needs a tenant and RULE 14 says a tenant comes off a Grant.
+// because a name needs a tenant and a tenant comes off a Grant.
 // The channel a caller named in the path is never trusted for that: it supplies
 // the name after the tenant, and nothing else.
 type Server struct {
@@ -381,7 +378,7 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	// refuse it; it cannot allow one this check refuses, so the two can only
 	// narrow, never disagree. Cross-origin sockets are not available in the
 	// first version, and when they are it will be this one function that
-	// changes, not a list in a config file (ADR 0052, RULE 9).
+	// changes, not a list in a config file.
 	s.upgrader = ws.Upgrader{
 		ReadBufferSize:  1024,
 		WriteBufferSize: 1024,
@@ -421,7 +418,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) { s.mux.Serve
 // many of another's people are online. The Grant has to be one a
 // [ConnectPolicy] issued -- auth.Grant.Check is what says so -- and the tenant
 // it carries is the only filter, because it is the only one that did not come
-// in with the request (RULE 14).
+// in with the request.
 func (s *Server) Connections(g auth.Grant) (int, error) {
 	tenant, err := registryTenant(g)
 	if err != nil {
@@ -444,9 +441,9 @@ func (s *Server) Connections(g auth.Grant) (int, error) {
 // Terminate closes every socket the Grant's tenant holds for one subject, and
 // answers how many it closed.
 //
-// It is the route Reverb calls terminate_connections, and it is what a sign-out
-// or a revoked membership calls: the socket was authorized once, at the
-// handshake, and nothing about it expires on its own.
+// It answers POST /apps/{appId}/users/{userId}/terminate_connections, and it
+// is what a sign-out or a revoked membership calls: the socket was authorized
+// once, at the handshake, and nothing about it expires on its own.
 func (s *Server) Terminate(ctx context.Context, g auth.Grant, subject string) (int, error) {
 	tenant, err := registryTenant(g)
 	if err != nil {
@@ -576,8 +573,7 @@ func (s *Server) read(r *http.Request, conn *Connection, socket *ws.Conn) {
 		// closes says nothing a dropped network does not also say, and what a
 		// client does about a dropped network is dial again -- so a tenant at
 		// its limit would be dialled in a loop for as long as it stayed there.
-		// 4004 is the code the Pusher clients already branch on, and it is the
-		// one Reverb sends here, so a client that handles Reverb handles this.
+		// 4004 is the code the Pusher clients already branch on.
 		//
 		// Saying so is best effort: a write that fails is logged and the close
 		// goes ahead, because a socket that will not take the frame is a socket
@@ -1037,7 +1033,7 @@ func (s *Server) enter(w http.ResponseWriter, r *http.Request) (auth.Grant, bool
 //
 // The Grant comes back with the channel because the two metrics routes have a
 // second half of their own -- [Server.fleet], which reads the tenant off it and
-// off nothing that arrived with the request (RULE 14).
+// off nothing that arrived with the request.
 func (s *Server) channel(w http.ResponseWriter, r *http.Request) (Channel, auth.Grant, bool) {
 	connected, ok := s.enter(w, r)
 	if !ok {

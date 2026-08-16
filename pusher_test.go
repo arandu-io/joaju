@@ -234,8 +234,9 @@ func TestCacheMissNamesTheChannelAndCarriesNothing(t *testing.T) {
 	}
 }
 
-// TestNoFrameCarriesTheTenant is RULE 14 on the way out: the client asked about
-// a name with no tenant in it and is answered about the same name. Every
+// TestNoFrameCarriesTheTenant is the tenant rule on the way out: the client
+// asked about a name with no tenant in it and is answered about the same name.
+// Every
 // constructor that names a channel is here, because the mistake is one line in
 // any one of them.
 func TestNoFrameCarriesTheTenant(t *testing.T) {

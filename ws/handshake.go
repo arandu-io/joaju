@@ -79,8 +79,7 @@ func headerContainsToken(h http.Header, name, token string) bool {
 // visitor's behalf.
 //
 // There is no field that widens it. Cross-origin sockets are not available, and
-// when they are, this one function changes -- not a list in a config file
-// (RULE 9).
+// when they are, this one function changes -- not a list in a config file.
 func sameOrigin(r *http.Request) bool {
 	origin := r.Header.Get("Origin")
 	if origin == "" {

@@ -5,22 +5,17 @@
 // Nothing here opens a socket, parses a frame or serves an HTTP route; the
 // packages that do those things take and return the values declared here.
 //
-// # Where the shapes come from
-//
-// The structure is laravel/reverb's -- the route table, the channel kinds, the
-// method names on a channel -- because a reader who knows Reverb should
-// recognize this repository without reading it first (RULE 10). The
-// implementation is not Reverb's and cannot be: Reverb is PHP on a ReactPHP
-// event loop, whose default stream_select stops at 1024 connections. In Go a
-// connection is a goroutine and the ceiling is the file descriptor limit, so
-// there is no event loop to pick (ADR 0052).
+// # The wire format
 //
 // The wire format is the Pusher protocol, which is why several names here are
-// Pusher's rather than Go's: [Member] has user_id and user_info, the event
-// names carry the "pusher:" and "pusher_internal:" prefixes, and a channel's
-// kind is read off its name prefix. Those are bytes a browser client already
-// knows how to read, and renaming them would mean shipping a client nobody else
-// can talk to.
+// the protocol's rather than Go's: [Member] has user_id and user_info, the
+// event names carry the "pusher:" and "pusher_internal:" prefixes, and a
+// channel's kind is read off its name prefix. Those are bytes a browser client
+// already knows how to read, and renaming them would mean shipping a client
+// nobody else can talk to.
+//
+// One connection is one goroutine. There is no event loop to size, and the
+// ceiling on concurrent sockets is the process's file descriptor limit.
 //
 // # The authorization shape, which is the point
 //
@@ -33,12 +28,12 @@
 // The first is whether this subject may hold a socket at all, and it is where
 // an origin allowlist belongs -- see [Handshake]. The second is whether this
 // subject may hear what goes out on one particular channel, and it is asked
-// again for every channel, because subscribing is a read and RULE 17 opens no
-// exception for reads.
+// again for every channel, because subscribing is a read and no read reaches a
+// channel without a policy behind it.
 //
 // A [Connection] cannot be built without a Grant, and a [ChannelName] cannot be
-// built without one either. That is RULE 14 as a type rather than a review
-// comment: the tenant is read off the Grant by [NewChannelName], and the name
+// built without one either. The tenant is enforced by the type and not by a
+// review comment: it is read off the Grant by [NewChannelName], and the name
 // the client sent is refused outright if it so much as contains the separator
 // the tenant goes before. A client that could put "acme:" in front of a channel
 // is a client choosing whose events it hears.
@@ -53,39 +48,32 @@
 // # What hesape already answers, and is not answered again here
 //
 // github.com/arandu-io/hesape/broadcasting owns the channel vocabulary shared
-// with the SSE fanout, and this package imports it rather than restating it
-// (RULE 9): broadcasting.PrivateChannelPrefix and
-// broadcasting.PresenceChannelPrefix, broadcasting.TenantSeparator,
-// broadcasting.RequestedChannel, broadcasting.TenantChannel and the
-// broadcasting.ChannelJoin action are all used here as they stand. Only the
-// three cache-channel prefixes are new, because SSE has no cache channel.
+// with the SSE fanout, and this package imports it rather than restating it:
+// broadcasting.PrivateChannelPrefix and broadcasting.PresenceChannelPrefix,
+// broadcasting.TenantSeparator, broadcasting.RequestedChannel,
+// broadcasting.TenantChannel and the broadcasting.ChannelJoin action are all
+// used here as they stand. Only the three cache-channel prefixes are new,
+// because SSE has no cache channel.
 //
-// # What Reverb has here and this package does not
+// # What this package deliberately leaves out
 //
-// Reverb's Channel::findById is [Channel.Find]. Reverb needs both because its
-// find() takes a Connection object and compares identity; here a connection is
-// identified by its [SocketID] and one lookup covers both callers.
+// Multi-application is out of the first version: a Go binary is one process,
+// and running one per application is both simpler to operate and free of the
+// cross-application state the tenant rules exist to prevent.
 //
-// Reverb's Channel::broadcastInternally is not on [Channel]. It exists there so
-// that a CacheChannel replaying a payload it received from another server does
-// not cache it a second time, and the distinction it draws is between an event
-// this server was handed and an event it was relayed. That belongs to the relay
-// and not to the channel interface, and putting it here would give every
-// implementation a second broadcast method to explain (RULE 9).
+// The protocol's private-encrypted- channels have no [ChannelType].
+// End-to-end encrypted channels are a key-distribution feature, not a channel
+// kind.
 //
-// Reverb's ChannelManager::for($app) is not here either: multi-application is
-// out of the first version, because a Go binary is one process and running one
-// per application is both simpler to operate and free of the cross-application
-// state RULE 14 exists to prevent (ADR 0052).
-//
-// Pusher's private-encrypted- channels have no [ChannelType]. Reverb has no
-// class for them, and end-to-end encrypted channels are a key-distribution
-// feature, not a channel kind.
+// [Channel] has no second broadcast method for an event this server was relayed
+// rather than handed. Suppressing the re-cache of a replayed payload is the
+// relay's business, and putting it here would give every implementation a
+// second way to broadcast to explain.
 //
 // # The routes these types serve
 //
-// The nine routes of Reverb's Factory::pusherRoutes, which the HTTP layer of
-// this repository answers with the values declared here:
+// The nine routes of the Pusher HTTP API, which the HTTP layer of this
+// repository answers with the values declared here:
 //
 //	GET  /app/{appKey}                                       the socket itself
 //	POST /apps/{appId}/events                                publish one
@@ -107,13 +95,13 @@
 // code: the surface this server actually uses is ten symbols, so writing them
 // costs less than carrying a library's client stack, proxy support and
 // compression -- and less than tracking somebody else's security advisories
-// forever (ADR 0052).
+// forever.
 //
 // # The other end
 //
 // Subpackage client is the browser half: the JavaScript that speaks this
 // protocol from a page, embedded and served rather than fetched from npm or a
-// CDN (ADR 0052, RULE 13). It is not routed by [Server] and the reason is in its
-// own documentation -- the script has to be served from the origin the PAGE is
-// on, and a socket server is frequently not that origin.
+// CDN. It is not routed by [Server] and the reason is in its own documentation
+// -- the script has to be served from the origin the PAGE is on, and a socket
+// server is frequently not that origin.
 package joaju

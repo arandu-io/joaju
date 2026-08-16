@@ -3,33 +3,32 @@
 // handler that put it on the wire.
 //
 // The protocol only exists if something on the other end speaks it, and nothing
-// in a browser speaks this one. In Laravel that half is laravel-echo over
-// pusher-js and both arrive through npm, which this project does not have
-// anywhere (RULE 13). So joaju.js is written here and served by the binary, the
-// same way HTMX and Alpine already arrive (ADR 0052). There is no package.json,
-// no lockfile, no bundler and no build step: the file that is embedded is the
-// file a browser runs.
+// in a browser speaks this one. The usual browser half of it arrives through
+// npm, which this project does not have anywhere. So joaju.js is written here
+// and served by the binary, the same way HTMX and Alpine already arrive. There
+// is no package.json, no lockfile, no bundler and no build step: the file that
+// is embedded is the file a browser runs.
 //
 // # Why this is a handler and not a tenth route on the Server
 //
-// [github.com/arandu-io/joaju.Server] answers nine routes, which are Reverb's
-// Factory::pusherRoutes, and this is not the tenth. The reason is the CSP rather
-// than the route table: the pages this client runs on are served under
-// script-src 'self', so the script has to come from the ORIGIN THE PAGE IS ON.
+// [github.com/arandu-io/joaju.Server] answers nine routes and this is not the
+// tenth. The reason is the CSP rather than the route table: the pages this
+// client runs on are served under script-src 'self', so the script has to come
+// from the ORIGIN THE PAGE IS ON.
 // A joaju server is frequently not that origin -- cmd/joaju is a process of its
 // own, at wss://socket.example.com, and a <script src> pointing there is refused
 // by the browser before a socket is ever attempted.
 //
 // A route on the Server would therefore work in the deployment where joaju is
 // mounted inside the application and be forbidden in the deployment where it is
-// not, which is the same URL meaning two things (RULE 9) -- with the broken one
+// not, which is the same URL meaning two things -- with the broken one
 // failing only in the deployment that has a separate socket server, i.e. in
 // production. So the application mounts it, on its own origin:
 //
 //	mux.HandleFunc(client.Path, client.Handler)
 //
-// An Arandu application does not even do that. The framework already has one
-// asset table with one content-addressed URL scheme, and this is a file for it:
+// An Arandu application does not even do that: it already has one asset table
+// with one content-addressed URL scheme, and this is a file for it:
 //
 //	view.RegisterAsset(client.Name, client.ContentType, client.Script())
 //

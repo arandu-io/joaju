@@ -8,16 +8,15 @@ import (
 // Observer is told what the server did, after it did it.
 //
 // It exists so that an application can count, log or audit without the server
-// knowing about counting, logging or auditing. Reverb fires five events for the
-// same purpose, through Laravel's dispatcher; there is no dispatcher here
-// (ADR 0001), so the destination is a value somebody passes in.
+// knowing about counting, logging or auditing. There is no event dispatcher in
+// this ecosystem, so the destination is a value somebody passes in.
 //
 // # Every method runs after the fact, and its return value is ignored
 //
 // None of these can refuse anything. A channel is created because somebody
 // authorised a subscription; a message is sent because it was already
 // broadcast. An observer that could veto would be a second authorisation path,
-// and RULE 17 allows one -- the [SubscriptionPolicy] is it.
+// and there is one -- the [SubscriptionPolicy].
 //
 // # It must not block
 //
@@ -42,9 +41,9 @@ type Observer interface {
 	// ConnectionClosed is a socket that went away, for any reason: the client
 	// closed it, the pong did not arrive in time, or the server terminated it.
 	//
-	// Reverb splits this into a close and a ConnectionPruned, because it prunes
-	// on a schedule and has to say which happened. Here the read deadline does
-	// the pruning, so there is one event and a reason string.
+	// There is one event for every way a socket can end, and a reason string
+	// to tell them apart: the read deadline does the pruning, so a pruned
+	// connection is not a separate kind of closure.
 	ConnectionClosed(ctx context.Context, id SocketID, tenant, reason string)
 
 	// MessageReceived is a frame that arrived from a client, before it is acted
@@ -87,11 +86,11 @@ var _ Observer = NopObserver{}
 
 // Counter is an Observer that counts, and the one an application usually wants.
 //
-// It answers what GET /apps/{appId}/connections and the Pulse cards in Reverb
-// answer: how many are connected, how many messages crossed, how many channels
-// exist. It holds numbers and nothing else -- no history, no per-connection
-// record -- because a server that remembers every connection is a server whose
-// memory grows with churn.
+// It answers what GET /apps/{appId}/connections answers: how many are
+// connected, how many messages crossed, how many channels exist. It holds
+// numbers and nothing else -- no history, no per-connection record -- because a
+// server that remembers every connection is a server whose memory grows with
+// churn.
 //
 // Safe for concurrent use. Every method may be called from any connection's
 // goroutine at any time, which is the normal case rather than the exception.
@@ -102,10 +101,10 @@ type Counter struct {
 
 // TenantCount is one tenant's numbers.
 //
-// Per tenant and never global, for the reason RULE 14 gives everywhere else: a
-// single number tells one customer how busy another one is. The rate of a
-// competitor's traffic is a business fact, and an operator reading a dashboard
-// is not a reason to publish it.
+// Per tenant and never global, for the reason the tenant is on everything else
+// here: a single number tells one customer how busy another one is. The rate
+// of a competitor's traffic is a business fact, and an operator reading a
+// dashboard is not a reason to publish it.
 type TenantCount struct {
 	// Connections is how many are open right now. It goes down.
 	Connections int64
@@ -117,8 +116,8 @@ type TenantCount struct {
 	Sent     int64
 }
 
-// NewCounter has no Reverb counterpart: Laravel's recorders are registered into
-// Pulse, and this is the value that plays their part.
+// NewCounter builds a [Counter] with no tenant recorded yet. A tenant appears
+// the first time something is counted for it.
 func NewCounter() *Counter {
 	return &Counter{perTenant: make(map[string]*TenantCount)}
 }
@@ -203,9 +202,9 @@ func (c *Counter) MessageSent(_ context.Context, _ SocketID, _ []byte) {
 //
 // The two message events carry a SocketID and no tenant, and looking the tenant
 // up would mean the counter holding a socket-to-tenant map -- a second registry
-// beside the server's, kept in step by hand (RULE 9). The totals are the one
-// number here that is not per tenant, and this name says so rather than an empty
-// string doing it silently.
+// beside the server's, kept in step by hand. The totals are the one number here
+// that is not per tenant, and this name says so rather than an empty string
+// doing it silently.
 const counterAllTenants = "*"
 
 var _ Observer = (*Counter)(nil)

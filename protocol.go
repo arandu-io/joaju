@@ -21,10 +21,8 @@ import (
 // record of which channels a socket reached, so that they can be left when it
 // dies.
 //
-// laravel/reverb splits the same job across two classes, Protocols\Pusher\Server
-// and Protocols\Pusher\EventHandler, and the split is its framework's rather
-// than the protocol's: one dispatches and the other answers. The four events are
-// one switch here, and the three methods below are the three that class has.
+// The four events are one switch, and dispatching them is not a separate stage:
+// a frame is read, matched and answered in one place.
 //
 // # What is NOT here
 //
@@ -34,8 +32,8 @@ import (
 // frames.
 //
 // The tenant. It is on the [Connection]'s Grant before any of this runs, and
-// [NewChannelName] is the only thing that reads it (RULE 14). The name a client
-// sends is the second half of a channel name and never the first.
+// [NewChannelName] is the only thing that reads it. The name a client sends is
+// the second half of a channel name and never the first.
 //
 // Who receives a frame. [channel.Subscribe] announces [EventMemberAdded] to the
 // others and replays a cache channel to the newcomer, because those go to
@@ -46,7 +44,7 @@ import (
 // # The decision, which is the point
 //
 // Every pusher:subscribe runs the [SubscriptionPolicy], on every kind of channel,
-// public ones included. Subscribing is a read and RULE 17 opens no exception for
+// public ones included. Subscribing is a read and there is no exception for
 // reads; [ChannelType.Guarded] says whether a policy may allow a subscription
 // freely, never whether one is asked. A refusal reaches the client as 4009 and
 // nothing else -- the sentence the policy wrote names the subject and the
@@ -75,8 +73,8 @@ type PusherConfig struct {
 	ActivityTimeout time.Duration
 
 	// ClientEvents is whether one browser's frame may be relayed to the others on
-	// the channel. It is off in its zero value, which is Pusher's default and
-	// Reverb's; [ClientEvents] is where the reason is written down.
+	// the channel. It is off in its zero value, which is the protocol's
+	// default; [ClientEvents] is where the reason is written down.
 	ClientEvents ClientEvents
 
 	// Observer is told when a channel came into existence and when it went. Nil
@@ -195,10 +193,10 @@ type pusher struct {
 	// tenant included, for the reason [memoryBroker] is keyed by it: every
 	// customer's clients ask for the same names.
 	//
-	// Reverb keeps the same record in its ChannelManager, which can walk every
-	// channel looking for a connection. [Broker] offers no such walk and should
-	// not: it is a scan of every channel in the process on every socket that
-	// closes, and what it recovers is a map this type can keep as it goes.
+	// [Broker] offers no way to walk every channel looking for a connection,
+	// and should not: that is a scan of every channel in the process on every
+	// socket that closes, and what it recovers is a map this type can keep as
+	// it goes.
 	seats map[SocketID]map[string]seat
 }
 
@@ -249,8 +247,7 @@ func (p *pusher) Message(ctx context.Context, conn *Connection, message []byte) 
 	case f.Event == EventPong:
 		// Nothing is owed to a pong. It is a client saying it is still there, and
 		// what that proves has already been recorded: the server reset the read
-		// deadline when it read the frame, before this was called. Reverb calls
-		// touch() here, which is the same deadline in the same place.
+		// deadline when it read the frame, before this was called.
 	}
 	if err != nil {
 		return p.refuse(ctx, conn, err)
@@ -261,10 +258,9 @@ func (p *pusher) Message(ctx context.Context, conn *Connection, message []byte) 
 
 // Close takes the socket off every channel it reached.
 //
-// It is Reverb's unsubscribeFromAll, and it is where a presence channel learns
-// that somebody's last tab closed: [channel.Unsubscribe] sends
-// [EventMemberRemoved] to the others. A channel left with nobody on it is
-// dropped, and [Observer.ChannelRemoved] says so.
+// It is where a presence channel learns that somebody's last tab closed:
+// [channel.Unsubscribe] sends [EventMemberRemoved] to the others. A channel
+// left with nobody on it is dropped, and [Observer.ChannelRemoved] says so.
 //
 // It answers nothing, which [Protocol] settled, and what it swallows is worth
 // naming: the failures here are writes to OTHER people's sockets. Each of those
@@ -281,10 +277,10 @@ func (p *pusher) Close(ctx context.Context, conn *Connection) {
 //
 // The order is the order of what each step protects. The name is built from the
 // socket's own Grant, so the tenant is settled before a policy is asked about
-// anything (RULE 14). The [SubscriptionPolicy] runs next, on every kind of
-// channel, and it is asked about the [Member] the client offered as well -- a
-// policy that does not compare it against the subject is a policy that lets a
-// subscriber join a presence channel as somebody else, which is why
+// anything. The [SubscriptionPolicy] runs next, on every kind of channel, and
+// it is asked about the [Member] the client offered as well -- a policy that
+// does not compare it against the subject is a policy that lets a subscriber
+// join a presence channel as somebody else, which is why
 // [Subscription] carries it. It is asked about the signature the client offered
 // for the same reason: evidence a policy is not shown is evidence it cannot
 // weigh. Only then is a channel reached, and [channel.Subscribe] asks the Grant
@@ -296,11 +292,10 @@ func (p *pusher) Close(ctx context.Context, conn *Connection) {
 // a list built a moment earlier is a list the new member is missing from.
 //
 // It follows that on a cache channel the replayed event, and on a presence
-// channel nothing, arrive BEFORE [EventSubscriptionSucceeded] -- Reverb sends
-// the confirmation first because its cache replay is in the same class that
-// sends the confirmation. Here the replay belongs to the channel (channels.go),
-// which cannot know which frame is an answer to whom, and a client that bound
-// its handlers before subscribing reads both either way.
+// channel nothing, arrive BEFORE [EventSubscriptionSucceeded]. The replay
+// belongs to the channel (channels.go), which cannot know which frame is an
+// answer to whom, and a client that bound its handlers before subscribing reads
+// both either way.
 func (p *pusher) join(ctx context.Context, conn *Connection, f Frame) error {
 	request, err := f.Subscribe()
 	if err != nil {
@@ -366,8 +361,8 @@ func (p *pusher) join(ctx context.Context, conn *Connection, f Frame) error {
 //
 // Nothing is sent back. The Pusher protocol has no confirmation for leaving, and
 // a client that unsubscribes from a channel it is not on is not making a mistake
-// -- it is a reconnect that raced its own cleanup. Reverb answers the same way,
-// with a null-safe call that does nothing when the channel is not there.
+// -- it is a reconnect that raced its own cleanup, and it is answered by doing
+// nothing.
 func (p *pusher) part(ctx context.Context, conn *Connection, f Frame) error {
 	requested, err := f.Unsubscribe()
 	if err != nil {
@@ -452,7 +447,7 @@ func (p *pusher) whisper(ctx context.Context, conn *Connection, f Frame) error {
 // reach [NewPusher]. So a Broker that is not relayed here is a deployment with no
 // fleet in it, and there is nobody to carry to. Taking a [Relay] of its own would
 // be a second thing to wire, a second thing to leave half-wired, and a second
-// answer to which relay this server is on (RULE 9).
+// answer to which relay this server is on.
 //
 // It runs after [Channel.Broadcast] and never instead of it, and it answers
 // nothing because there is nothing a client could do with the answer: every
@@ -650,7 +645,7 @@ func (p *pusher) forget(id SocketID) []seat {
 // It is the only thing in this file that writes, so [Encode] is called in one
 // place and the rule it enforces -- [ChannelName.Requested] goes out and
 // [ChannelName.String] never does -- has one call site to hold here, as it has
-// one in channels.go (RULE 9).
+// one in channels.go.
 func (p *pusher) write(ctx context.Context, conn *Connection, f Frame) error {
 	message, err := Encode(f)
 	if err != nil {

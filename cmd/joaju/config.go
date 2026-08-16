@@ -15,7 +15,7 @@ import (
 //
 // One prefix and one source: there is no configuration file, no flag and no
 // remote configuration service, because a process that can be configured three
-// ways is a process whose running configuration nobody can state (RULE 9). The
+// ways is a process whose running configuration nobody can state. The
 // environment is the one a container runtime, a systemd unit and a shell all
 // already have.
 const envPrefix = "JOAJU_"
@@ -28,8 +28,8 @@ const envPrefix = "JOAJU_"
 // three have no counterpart there because they belong to the process and not to
 // the server.
 const (
-	// defaultAddr is the address the server listens on when none was given. The
-	// port is Reverb's, so a client's configuration means the same thing here.
+	// defaultAddr is the address the server listens on when none was given.
+	// The port is the one a client's configuration expects by default.
 	defaultAddr = ":8080"
 	// defaultShutdownTimeout is how long a signalled process gives itself to
 	// stop listening, answer the requests already in flight and close the
@@ -58,7 +58,7 @@ type config struct {
 	//
 	// It is HTTP, and there is no TLS field: a WebSocket server terminating its
 	// own TLS would need a certificate, a reload path and a cipher policy, all
-	// three of which the reverse proxy in front of it already has (ADR 0052).
+	// three of which the reverse proxy in front of it already has.
 	Addr string
 
 	// AppID and AppKey are the {appId} of the API routes and the {appKey} of the
@@ -71,10 +71,10 @@ type config struct {
 	// Tenant is whose data this process serves, and it is configuration rather
 	// than anything that arrives with a request.
 	//
-	// It is the whole of RULE 14 for a standalone binary: every Grant issued
-	// here carries this tenant, every channel name is built from such a Grant,
-	// and nothing on the wire can change it. One process is one application
-	// (ADR 0052), and one application is one customer's namespace.
+	// It is the whole of the tenant rule for a standalone binary: every Grant
+	// issued here carries this tenant, every channel name is built from such a
+	// Grant, and nothing on the wire can change it. One process is one
+	// application, and one application is one customer's namespace.
 	Tenant string
 
 	// AllowedOrigins is the origins a browser may open a socket from, verbatim
@@ -87,7 +87,7 @@ type config struct {
 
 	// ClientEvents is whether a frame one browser publishes is relayed to the
 	// others on the channel. Off unless a deployment says otherwise, which is
-	// Pusher's default and Reverb's. See [joaju.ClientEvents].
+	// the protocol's default too. See [joaju.ClientEvents].
 	ClientEvents joaju.ClientEvents
 
 	// The socket's limits, passed through untouched. Zero is the Default of the
@@ -314,8 +314,7 @@ func (env environment) clientEvents(name string) (joaju.ClientEvents, error) {
 //
 // slog parses it, so the offsets it understands -- "warn+1" -- are understood
 // here too, and the vocabulary is the one the log lines themselves are labelled
-// with. It is this binary's answer to Reverb's --debug flag, which swaps the
-// logger for a verbose one.
+// with. It is the only thing about the logger a deployment chooses.
 func (env environment) level(name string) (slog.Level, error) {
 	raw := env.text(name)
 	if raw == "" {

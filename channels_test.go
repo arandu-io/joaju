@@ -222,9 +222,9 @@ func TestChannelSubscribeRefusesAGrantFromAnotherTenant(t *testing.T) {
 	}
 }
 
-// The Grant may be the channel's tenant and the socket somebody else's. Reverb
-// has no such check, because Reverb has no tenants; here it is the line that
-// stops one customer's Grant from seating another customer's socket.
+// The Grant may be the channel's tenant and the socket somebody else's. This is
+// the line that stops one customer's Grant from seating another customer's
+// socket.
 func TestChannelSubscribeRefusesAConnectionFromAnotherTenant(t *testing.T) {
 	c := channelTestChannel(t, "acme", "private-orders.17")
 	conn, _ := channelTestConnection(t, "globex", "u1")
@@ -243,7 +243,7 @@ func TestChannelSubscribeRefusesAGrantIssuedForAnotherAction(t *testing.T) {
 	conn, _ := channelTestConnection(t, "acme", "u1")
 
 	// The Grant the socket itself holds: same subject, same tenant, issued for
-	// Connect. Reusing it would mean no subscription policy ever ran (RULE 17).
+	// Connect. Reusing it would mean no subscription policy ever ran.
 	err := c.Subscribe(context.Background(), conn.Grant(), conn, Member{})
 	if err == nil {
 		t.Fatal("the grant that opened the socket also subscribed it: no subscription policy was consulted, and every channel of the tenant is reachable by anyone who may connect")

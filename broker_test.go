@@ -142,8 +142,8 @@ func TestMemoryBrokerRefusesAGrantFromAnotherTenant(t *testing.T) {
 	}
 }
 
-// RULE 17 in the broker: the Grant that opened the socket is not the Grant that
-// reaches a channel. If it were, no [SubscriptionPolicy] would ever run and
+// The Grant that opened the socket is not the Grant that reaches a channel. If
+// it were, no [SubscriptionPolicy] would ever run and
 // every channel of the tenant would be readable by anyone allowed to connect.
 func TestMemoryBrokerRefusesTheGrantThatOpenedTheSocket(t *testing.T) {
 	b := NewMemoryBroker()

@@ -164,7 +164,7 @@ func awaitDelivery(ctx context.Context, t *testing.T, publisher joaju.Bus, topic
 //
 // The topic is a string here, and that is the other half of what is being
 // checked. The tenant sits in the middle of it because [joaju.Topic] put it
-// there from a Grant (RULE 14); nothing in this package reads it, splits on it
+// there from a Grant; nothing in this package reads it, splits on it
 // or knows it is there, which is what keeps the tenant boundary in the one
 // place that can enforce it.
 func TestAPublishReachesASubscriberOnAnotherConnection(t *testing.T) {
@@ -203,14 +203,14 @@ func TestAPublishReachesASubscriberOnAnotherConnection(t *testing.T) {
 	}
 }
 
-// TestPublishAndSubscribeDoNotShareASocket is the decision Reverb's two clients
-// exist for, checked on one connection.
+// TestPublishAndSubscribeDoNotShareASocket is the reason one connection can be
+// both halves, checked rather than assumed.
 //
 // A RESP connection in subscribe mode refuses every command that is not a
-// subscribe, which is why Reverb opens a publisher and a subscriber: the client
-// under it is one socket. This driver dials a socket of its own for each
-// subscription, outside the pool the commands use, so one connection is both
-// halves. If that ever stops being true, the publish below answers "ERR only
+// subscribe, which is what usually forces a separate publisher and subscriber.
+// This driver dials a socket of its own for each subscription, outside the pool
+// the commands use, so one connection is both halves. If that ever stops being
+// true, the publish below answers "ERR only
 // (P|S)SUBSCRIBE / (P|S)UNSUBSCRIBE / PING / QUIT / RESET are allowed" and this
 // test says so before a fleet does.
 func TestPublishAndSubscribeDoNotShareASocket(t *testing.T) {
@@ -244,9 +244,9 @@ func TestPublishAndSubscribeDoNotShareASocket(t *testing.T) {
 // whose Redis restarts must not come back with instances that no longer hear
 // each other.
 //
-// Reverb re-runs its subscribe() on every connection rather than on the first,
-// because a socket dialled again is subscribed to nothing. The driver here
-// keeps the channel set and re-sends it, and this test is what says so: the
+// A socket dialled again is subscribed to nothing, so the channel set has to be
+// re-sent on every connection and not only on the first. The driver here keeps
+// that set and re-sends it, and this test is what says so: the
 // subscriber reaches the server through a proxy the test can kill, the
 // publisher does not, and after every proxied socket is closed the same topic
 // delivers again -- without anything in this package having noticed.

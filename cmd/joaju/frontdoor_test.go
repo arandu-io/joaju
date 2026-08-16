@@ -16,9 +16,9 @@ import (
 )
 
 // The application this front door answers for. The key and the secret are the
-// pair from Pusher's own worked example of the REST signature, so that
-// [TestSigningStringIsThePusherCanonicalForm] and the tests around it agree on
-// who is calling.
+// pair from the protocol's canonical worked example of the REST signature, so
+// that [TestSigningStringIsThePusherCanonicalForm] and the tests around it
+// agree on who is calling.
 const (
 	testAppKey    = "278d425bdf160c739803"
 	testAppSecret = "7ad3773142a6692b25b8"
@@ -31,7 +31,7 @@ const (
 var testClock = time.Unix(1353684343, 0)
 
 // TestSigningStringIsThePusherCanonicalForm checks this implementation against
-// the worked example in Pusher's REST authentication documentation.
+// the canonical worked example of the protocol's REST authentication.
 //
 // It is the one test here that proves anything about interoperability, and the
 // canonical form is what it has to prove: HMAC-SHA256 over a string is not
@@ -40,7 +40,7 @@ var testClock = time.Unix(1353684343, 0)
 // order, and escaped or not. A client SDK that builds this string has to be
 // accepted by this server.
 //
-// The body and its digest are the documented ones, which is a second check
+// The body and its digest come from that same example, which is a second check
 // worth having: it says the body_md5 computed here is the body_md5 a client
 // computes.
 func TestSigningStringIsThePusherCanonicalForm(t *testing.T) {

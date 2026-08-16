@@ -93,7 +93,7 @@ func TestConnectPolicyRefusesAnotherTenant(t *testing.T) {
 
 	// Nothing in this process mints a subject for another tenant, so this is a
 	// wiring mistake rather than a customer -- and it is refused where it would
-	// otherwise become a Grant carrying somebody else's namespace (RULE 14).
+	// otherwise become a Grant carrying somebody else's namespace.
 	policy := connectPolicy{tenant: testTenant}
 
 	if _, err := auth.Authorize(context.Background(), policy, browser("another"), joaju.Connect,

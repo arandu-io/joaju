@@ -14,37 +14,35 @@
 // # Why it is its own module
 //
 // The driver underneath is a third-party dependency, and Go has no optional
-// dependency (ADR 0048). The root module of this repository has one require
-// line and a CI step that fails when it grows a second: subpackage ws is this
-// project's own RFC 6455 precisely so that the transport costs nothing in the
-// dependency graph (ADR 0052), and a Redis client imported at the root would
-// spend what that bought -- on every project running a single instance, which
-// needs no bus at all.
+// dependency. The root module of this repository has one require line and a CI
+// step that fails when it grows a second: subpackage ws is this project's own
+// RFC 6455 precisely so that the transport costs nothing in the dependency
+// graph, and a Redis client imported at the root would spend what that bought
+// -- on every project running a single instance, which needs no bus at all.
 //
 // # The protocol is RESP, and RESP is four products
 //
 // Dragonfly, Redis, Valkey and KeyDB all answer it, and the two commands used
 // here are in all four. Nothing here may reach for RedisJSON, RediSearch or a
-// Lua script (RULE 11): the moment it does, choosing the product stops being a
-// connection string and a fleet is pinned to one vendor by its message bus.
+// Lua script: the moment it does, choosing the product stops being a connection
+// string and a fleet is pinned to one vendor by its message bus.
 //
 // # What the driver already answers, and what is not built again here
 //
-// Reverb's RedisPubSubProvider opens two clients, a publisher and a subscriber,
-// because a connection in subscribe mode refuses every other command and the
-// ReactPHP client under it is one socket per client. This driver is not: a
-// subscription is dialled on a socket of its own, outside the pool the commands
-// use, so a PUBLISH issued on a connection that is subscribed goes out on a
-// different socket than the SUBSCRIBE did. One [connections.Connection] is
-// therefore both halves, and a second would be another pool to size rather than
-// another guarantee -- see TestPublishAndSubscribeDoNotShareASocket, which
-// checks that against a server rather than believing it.
+// A separate publisher and subscriber are not opened here. A connection in
+// subscribe mode refuses every other command, but this driver dials a
+// subscription on a socket of its own, outside the pool the commands use, so a
+// PUBLISH issued on a connection that is subscribed goes out on a different
+// socket than the SUBSCRIBE did. One [connections.Connection] is therefore both
+// halves, and a second would be another pool to size rather than another
+// guarantee -- see TestPublishAndSubscribeDoNotShareASocket, which checks that
+// against a server rather than believing it.
 //
-// Reverb's subscriber re-runs its subscribe() on every connection and not only
-// on the first, because a socket that was dialled again is subscribed to
-// nothing. The driver keeps the set of channels and re-sends it when it dials
-// again, so a server that goes away and comes back finds the subscription where
-// it was -- see TestASubscriptionSurvivesTheConnectionDying.
+// Re-subscribing after a reconnect is not built again either. A socket that was
+// dialled again is subscribed to nothing; the driver keeps the set of channels
+// and re-sends it when it dials again, so a server that goes away and comes
+// back finds the subscription where it was -- see
+// TestASubscriptionSurvivesTheConnectionDying.
 //
 // # One socket per relayed channel
 //
@@ -71,8 +69,8 @@ import (
 // by [connections.Connect] and closed by whatever opened it, and handing over
 // the one that already serves the cache is the expected wiring rather than a
 // shortcut. Nothing here opens one, because [connections.Connect] is how this
-// stack opens a RESP connection and a second door onto the same thing is the
-// complexity RULE 9 exists to refuse.
+// stack opens a RESP connection, and a second door onto the same thing is
+// complexity for nothing.
 //
 // It does not talk to the server, and a Redis that is down at this moment is
 // not an error. That is [joaju.NewRelay]'s posture too -- it takes a nil bus,
@@ -147,7 +145,7 @@ func (b *bus) Publish(ctx context.Context, channel string, message any) (int64, 
 // subscription itself, faster than a loop out here could, and a message
 // published in between is lost either way -- pub/sub has no queue and no
 // replay. A second recovery path over the driver's own would be two ways to do
-// one thing (RULE 9), and the slower one would be the one holding the socket.
+// one thing, and the slower one would be the one holding the socket.
 //
 // An empty channel list is refused. The driver accepts it, subscribes to
 // nothing, and blocks: a call that delivers no message, reports no error and

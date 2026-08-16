@@ -26,7 +26,7 @@ var ErrNotUpgradable = errors.New("ws: the request is not a websocket handshake"
 // there is no configuration that widens it -- see that function for why a
 // websocket handshake has no browser-side protection of its own. Cross-origin
 // sockets are not available; when they are, one function changes rather than a
-// list in a config file (RULE 9).
+// list in a config file.
 //
 // No Subprotocols field. The Pusher protocol carries its version in the query
 // string, so Sec-WebSocket-Protocol has nothing to negotiate here, and a field

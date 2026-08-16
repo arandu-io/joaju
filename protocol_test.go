@@ -217,8 +217,8 @@ func protocolSend(t *testing.T, conn *ws.Conn, frame string) {
 
 // protocolNext reads one frame, and refuses one carrying the tenant.
 //
-// The second half is RULE 14 asserted on every frame this file reads rather than
-// in a test of its own: the client asked about a name with no tenant in it and
+// The second half is asserted on every frame this file reads rather than in a
+// test of its own: the client asked about a name with no tenant in it and
 // is answered about the same name, and one frame built the wrong way anywhere in
 // protocol.go fails here.
 func protocolNext(t *testing.T, conn *ws.Conn) joaju.Frame {
@@ -357,7 +357,7 @@ func TestPusherEstablishesTheConnectionWithTheSocketIDAndTheActivityTimeout(t *t
 	}
 }
 
-// A public channel is authorized like every other one. RULE 17 has no exception
+// A public channel is authorized like every other one. There is no exception
 // for reads, and [joaju.ChannelType.Guarded] says whether a policy may allow a
 // subscription freely -- never whether one is asked.
 func TestPusherAsksThePolicyAboutAPublicChannelToo(t *testing.T) {

@@ -15,22 +15,17 @@ import (
 
 // This file is the [Channel] implementation, and there is one of it.
 //
-// Reverb has six Channel classes -- Channel, PrivateChannel, PresenceChannel,
-// CacheChannel, PrivateCacheChannel, PresenceCacheChannel -- and five of them
-// exist to answer questions their names already answer. PrivateChannel adds no
-// behaviour at all: it is a name prefix, and Reverb reads the prefix back off
-// the name anyway in UsePusherChannelConventions. What actually varies is two
-// booleans, and both are already on the name:
+// There are six kinds of channel and one type for them, because what actually
+// varies between the kinds is two booleans, and both are already on the name:
 //
 //	[ChannelType.Presence]  publish the subscribers to each other
 //	[ChannelType.Cache]     replay the last event to whoever subscribes next
 //
-// Six types here would be six copies of the subscriber map, the lock, the
-// delivery loop and the tenant check, differing in those two booleans -- and
-// the tenant check is the one thing in this repository that may not exist in
-// six copies, because five of them would be right (RULE 9). So there is one
-// type, it reads [ChannelName.Type], and [NewChannel] is the whole of Reverb's
-// ChannelBroker::create.
+// Six types would be six copies of the subscriber map, the lock, the delivery
+// loop and the tenant check, differing in those two booleans -- and the tenant
+// check is the one thing in this repository that may not exist in six copies,
+// because five of them would be right. So there is one type and it reads
+// [ChannelName.Type].
 //
 // What is NOT in this file: the wire format, and the frames the server sends
 // around a subscription rather than through it.
@@ -39,7 +34,7 @@ import (
 // [MemberRemoved], [CacheMiss] -- and encoded by [Encode]. A channel decides
 // who receives and pusher.go decides what the bytes look like, so the rule that
 // [ChannelName.Requested] goes out and [ChannelName.String] never does is
-// enforced in one function instead of in six (RULE 9).
+// enforced in one function instead of in six.
 //
 // [EventSubscriptionSucceeded] carries [Channel.Data] and is the server
 // answering the client that asked -- the channel is not involved, and it has no
@@ -50,11 +45,9 @@ import (
 // NewChannel is the only way to a [Channel], and it makes the kind
 // [ChannelName.Type] names.
 //
-// It is Reverb's ChannelBroker::create, which switches on the same prefixes to
-// pick a subclass. There is no subclass to pick here and no argument that says
-// which kind to build: the kind is in the name, the name came from a Grant, and
-// a caller who could ask for a public channel under a private name would have
-// found the way around [ChannelType.Guarded].
+// There is no argument that says which kind to build: the kind is in the name,
+// the name came from a Grant, and a caller who could ask for a public channel
+// under a private name would have found the way around [ChannelType.Guarded].
 //
 // The zero [ChannelName] is refused. It is what a failed [NewChannelName] hands
 // back, and a channel built from one would be a channel with no tenant.
@@ -141,9 +134,9 @@ func (c *channel) Subscribed(conn *Connection) bool {
 //
 //   - the Grant was issued for broadcasting.ChannelJoin, so a
 //     [SubscriptionPolicy] answered about this subscription and not something
-//     else. RULE 17: subscribing is a read, and a read with no policy behind it
-//     is data nobody decided anyone could have;
-//   - the Grant's tenant is the channel's tenant. RULE 14 is already in the
+//     else. Subscribing is a read, and a read with no policy behind it is data
+//     nobody decided anyone could have;
+//   - the Grant's tenant is the channel's tenant. The tenant is already in the
 //     name -- [NewChannelName] put it there off a Grant -- so this catches the
 //     one case that construction cannot: a name built under one Grant, carried
 //     to another;
@@ -293,7 +286,7 @@ func (c *channel) BroadcastToAll(ctx context.Context, e Event) error {
 
 // Data is what [EventSubscriptionSucceeded] carries to a new subscriber.
 //
-// It is Reverb's presence block and it is empty off a presence channel:
+// It is the protocol's presence block, and it is empty off a presence channel:
 //
 //	{"presence": {"count": 2, "ids": ["u1","u2"], "hash": {"u1": {...}, "u2": {...}}}}
 //
@@ -447,8 +440,8 @@ func (c *channel) emit(ctx context.Context, to []Subscriber, f Frame, err error)
 //
 // The frame is built by pusher.go and encoded by [Encode], and this file has no
 // second way to turn an [Event] into bytes: what goes out on the wire is one
-// piece of code (RULE 9), which is also the piece that drops the tenant from
-// the channel name.
+// piece of code, which is also the piece that drops the tenant from the channel
+// name.
 //
 // A socket that refuses the write does not stop the others. The errors are
 // joined so the caller learns about all of them.

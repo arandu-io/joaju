@@ -147,8 +147,8 @@ func TestTheURLCarriesTheHashOfWhatIsServed(t *testing.T) {
 	}
 }
 
-// RULE 13, checked rather than promised, and this package is where it is most
-// likely to be broken: it is the one that ships JavaScript.
+// No Node anywhere, checked rather than promised, and this package is where it
+// is most likely to be broken: it is the one that ships JavaScript.
 //
 // A project runs with `git clone && aru dev`. The moment a package.json appears
 // next to a .js file, somebody has a reason to run npm install, and the reason

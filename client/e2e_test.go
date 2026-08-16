@@ -162,8 +162,8 @@ func e2eSubjects(next http.Handler, sequence ...string) http.Handler {
 	})
 }
 
-// e2eAuthorize is the application's /broadcasting/auth: Pusher's shape, and
-// Laravel's route.
+// e2eAuthorize is the application's /broadcasting/auth endpoint, in the shape
+// the Pusher protocol expects.
 //
 // It answers a signature for anything, including the channel the policy then
 // refuses -- an authorization endpoint that also enforced would be the second
@@ -356,8 +356,8 @@ func TestTheClientSpeaksTheProtocolEndToEnd(t *testing.T) {
 		t.Error("a client event on a public channel was sent: the client should refuse it before the server has to")
 	}
 
-	// RULE 14, seen from the browser: the tenant is on every name the server
-	// holds and on nothing the client ever receives.
+	// The tenant, seen from the browser: it is on every name the server holds
+	// and on nothing the client ever receives.
 	if encoded, err := json.Marshal(result); err != nil {
 		t.Fatal(err)
 	} else if bytes.Contains(encoded, []byte(e2eTenant+":")) {

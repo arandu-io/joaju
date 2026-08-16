@@ -1,9 +1,7 @@
 // Package ws is the WebSocket protocol of RFC 6455, written for this server.
 //
 // It is not a fork and it borrows no code. The RFC is the specification, and
-// gorilla/websocket was read the way reference_laravel is read everywhere else
-// in this project -- for structure and for the names an ecosystem already knows
-// (RULE 7). What is written here is written here.
+// what is written here is written here.
 //
 // # What it is, and what it deliberately is not
 //
@@ -15,8 +13,8 @@
 // It does not do permessage-deflate. Compression on a websocket is a per-message
 // negotiation, a second framing path, and a CRIME-shaped hazard when the payload
 // mixes attacker-controlled text with a session identifier. The Autobahn cases
-// for it are 12.* and 13.*, and they are the two groups laravel/reverb also
-// excludes -- so the conformance target is the same one it measures against.
+// for it are 12.* and 13.*, and those two groups are outside the conformance
+// target.
 package ws
 
 import (

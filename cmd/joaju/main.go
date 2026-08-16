@@ -3,14 +3,13 @@
 // The library is mountable: [joaju.Server] is an http.Handler, and an Arandu
 // application that wants sockets puts it behind its own middleware and its own
 // policies. This command is the other deployment -- the socket server as a
-// process of its own, which is what Reverb's reverb:start starts and what a
-// container image runs.
+// process of its own, which is what a container image runs.
 //
 // # What it is configured with
 //
 // The environment, every variable prefixed JOAJU_. There is no flag and no
 // configuration file, because two ways to say the same thing is two ways to be
-// wrong about what a running process is doing (RULE 9). See [config].
+// wrong about what a running process is doing. See [config].
 //
 // # What it decides, and what it refuses to decide
 //
@@ -21,20 +20,20 @@
 // itself, so that is what it authenticates: the HTTP API is signed and
 // [frontDoor] verifies it, a browser is the anonymous reader hesape calls
 // auth.Guest, and the tenant of both is the process's configuration and never
-// the request's (RULE 14).
+// the request's.
 //
 // The consequence is stated where it is decided, in [subscriptionPolicy]: a
 // browser reaches a public channel because the tenant is the whole question
 // there, and reaches a private or presence one by offering the signature the
 // Pusher protocol has its application issue -- which arrives as
 // [joaju.Subscription.Auth] and is recomputed here. The signature decides
-// nothing on its own; the policy does, and the tenant still comes off the Grant
-// (RULE 14).
+// nothing on its own; the policy does, and the tenant still comes off the
+// Grant.
 //
 // # What terminates TLS
 //
 // Not this. It serves HTTP and a reverse proxy in front of it holds the
-// certificate (ADR 0052).
+// certificate.
 package main
 
 import (
@@ -70,8 +69,7 @@ func run() error {
 	}
 
 	// JSON, because the output of a server is read by whatever collects it and
-	// not by the person who started it. The level is the only thing configured,
-	// which is this binary's answer to Reverb's --debug.
+	// not by the person who started it. The level is the only thing configured.
 	log := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: cfg.LogLevel}))
 
 	server, err := newServer(cfg, log)
@@ -113,9 +111,9 @@ func run() error {
 	}
 
 	// SIGINT and SIGTERM, which are the two a container runtime and a terminal
-	// send. Reverb also handles SIGTSTP; a Go process suspended by the terminal
-	// is resumed by the terminal, and catching it would turn a suspend into a
-	// shutdown.
+	// send. SIGTSTP is deliberately not caught: a Go process suspended by the
+	// terminal is resumed by the terminal, and catching it would turn a suspend
+	// into a shutdown.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -177,7 +175,7 @@ func newServer(cfg config, log *slog.Logger) (*joaju.Server, error) {
 		//
 		// Observer is nil too, which [joaju.NewServer] reads as NopObserver:
 		// there is nothing in this process for the five events to be reported
-		// to, and a metrics exporter is a decision of its own (RULE 3).
+		// to, and a metrics exporter is a decision of its own.
 
 		MaxMessageSize:       cfg.MaxMessageSize,
 		MaxBodySize:          cfg.MaxBodySize,

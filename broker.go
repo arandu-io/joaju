@@ -14,17 +14,14 @@ import (
 
 // This file is the [Broker] implementation, and there is one of it.
 //
-// Reverb keeps the same state in two classes. ArrayChannelManager holds the
-// channels; ArrayChannelConnectionManager holds one channel's connections. The
-// second is already written -- it is the subscriber map inside [channel], in
-// channels.go -- so what is left is the first, and the whole of it is a map from
-// a name to a [Channel].
+// One channel's connections are already written -- they are the subscriber map
+// inside [channel], in channels.go -- so what is left is the registry, and the
+// whole of it is a map from a name to a [Channel].
 //
-// Reverb's map is nested, $applications[$appId][$channel], because a Reverb
-// process serves several applications. This one is flat and keyed by
-// [ChannelName.String], "acme:private-orders.17": the tenant is in the key and
-// it got there from a Grant, not from a path segment (RULE 14). Nesting it would
-// leave the inner key free to be [ChannelName.Requested], and then two customers
+// The map is flat and keyed by [ChannelName.String],
+// "acme:private-orders.17": the tenant is in the key and it got there from a
+// Grant, not from a path segment. Nesting it one level per tenant would leave
+// the inner key free to be [ChannelName.Requested], and then two customers
 // asking for "orders.17" would be two ways of spelling one key -- the single
 // mistake this file cannot make, because the two channels it merged would be two
 // customers reading each other's events.
@@ -39,7 +36,7 @@ import (
 // The decision about who may be seated. Reaching a channel and joining it are
 // two operations, and [channel.Subscribe] makes the second one. What this file
 // decides is the first: the Grant it was handed was issued by a
-// [SubscriptionPolicy], and it is for the tenant that owns the name (RULE 17).
+// [SubscriptionPolicy], and it is for the tenant that owns the name.
 //
 // The [Observer]. [Observer.ChannelCreated] and [Observer.ChannelRemoved] are
 // announced by whoever holds an Observer, which is the [Server].
@@ -57,8 +54,7 @@ import (
 // over [Relay], and the metrics routes ask the fleet rather than a shared store.
 //
 // It takes no argument. There is nothing to configure about a map, and an option
-// on it would be a second way to build the one registry this package has
-// (RULE 9).
+// on it would be a second way to build the one registry this package has.
 func NewMemoryBroker() Broker {
 	return &memoryBroker{channels: make(map[string]Channel)}
 }
@@ -111,7 +107,7 @@ func (b *memoryBroker) Find(_ context.Context, g auth.Grant, name ChannelName) (
 }
 
 // FindOrCreate is [memoryBroker.Find], creating the channel when it is not there
-// yet. It is Reverb's ArrayChannelManager::findOrCreate.
+// yet.
 //
 // All of it happens under the write lock, [NewChannel] included. The shape that
 // reads faster -- look under a read lock, insert under a write one -- is not
@@ -159,11 +155,10 @@ func (b *memoryBroker) FindOrCreate(_ context.Context, g auth.Grant, name Channe
 // publish goes to that one, and the socket on the first hears nothing and is
 // told nothing. So the question and the delete are one critical section.
 //
-// Reverb makes the same check in Channel::unsubscribe, where the channel reaches
-// back for the manager through the container. There is no container here
-// (ADR 0001) and [NewChannel] takes nothing but a name, so a channel does not
-// know this type exists -- which is also what makes the nesting below safe. The
-// channel's lock is taken under this one and never the other way round.
+// The check is made here and not from inside the channel: [NewChannel] takes
+// nothing but a name, so a channel does not know this type exists -- which is
+// also what makes the nesting below safe. The channel's lock is taken under
+// this one and never the other way round.
 //
 // Asking is [Channel.Connections], the only thing the interface offers for it,
 // and it is enough: it is a read, [Channel] says the reads of a channel are not
@@ -249,7 +244,7 @@ func (b *memoryBroker) All(_ context.Context, g auth.Grant) ([]Channel, error) {
 // A Grant carrying no tenant is refused rather than read as every tenant. It
 // would list nothing today, because every channel held here was named from a
 // Grant that had one, and "nothing" is the right answer for the wrong reason --
-// RULE 14 has no Grant without a tenant, and this says so instead of relying on
+// there is no Grant without a tenant, and this says so instead of relying on
 // the map to stay a certain shape.
 func (b *memoryBroker) tenantOf(g auth.Grant) (string, error) {
 	if err := g.Check(broadcasting.ChannelJoin); err != nil {
@@ -271,7 +266,7 @@ func (b *memoryBroker) tenantOf(g auth.Grant) (string, error) {
 // one case [NewChannelName] cannot: a name built under one Grant and carried to
 // another. Both values are valid and nothing but this line notices. It is
 // [channel.Subscribe]'s second check made again, because reaching a channel and
-// being seated on it are two operations and RULE 17 covers the read as well.
+// being seated on it are two operations and the read needs a policy too.
 //
 // The zero name is refused by name rather than left to the comparison below,
 // which would also refuse it -- with a sentence that has a hole where the
