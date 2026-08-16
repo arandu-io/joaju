@@ -21,22 +21,84 @@ to Pusher or to Reverb talks to this. Nine HTTP routes and six kinds of channel,
 carrying the names Reverb uses, because a reader who knows Reverb should
 recognize this repository without reading it first.
 
-```go
-server, err := joaju.NewServer(cfg)
+It is one library and two deployments. `Server` is an `http.Handler`, so an
+Arandu application mounts it behind its own middleware and its own policies;
+`cmd/joaju` is the same server as a process of its own, which is what a
+container image runs.
+
+## What it delivers
+
+**One entry in the dependency graph, and the transport is why.** The root
+`go.mod` requires `github.com/arandu-io/hesape` and nothing else, and a CI step
+fails the build if it grows a second. Subpackage `ws` is this project's own
+RFC 6455 — not a fork, no borrowed code — because the surface this server uses
+is ten symbols, while a websocket library carries a client stack, proxy support
+and compression on top of them. It is measured and not asserted: Autobahn
+TestSuite version 18, every case except `12.*` and `13.*` — permessage-deflate,
+the same pair `laravel/reverb` excludes — **301 cases, 0 failures**. The report
+is [`ws/internal/autobahn/REPORT.txt`](ws/internal/autobahn/REPORT.txt).
+
+**No path to a channel that a policy did not open.** The server authenticates
+nobody: it reads the subject the framework's middleware put on the request and
+asks a Policy about it. Two decisions, each issuing a Grant — one for holding a
+socket at all, one for reaching a channel, asked again for every channel and on
+every route that touches one. Subscribing is a read, and there is no exception
+for reads. A connection cannot be built without a Grant, a channel name cannot
+either, and the tenant is read off the Grant rather than off the wire.
+
+**Broadcast that crosses instances.** A `Relay` hands the fleet an event this
+instance has already delivered, and the four metrics routes ask the others and
+add up what answers in time; a bus it cannot reach degrades to this process
+rather than failing a request. The bus is RESP pub/sub, in the `redis/`
+submodule — its own `go.mod`, because the driver under it is third-party and Go
+has no optional dependency.
+
+9,114 lines of production code and 8,176 of test.
+
+## Install
+
+```sh
+go get github.com/arandu-io/joaju
+go get github.com/arandu-io/joaju/redis   # the bus, for more than one instance
 ```
 
-`Server` is an `http.Handler` and it authenticates nobody: it reads the subject
-the framework's middleware put on the request and asks a Policy about it.
-Subscribing to a channel is a read, and reads have no exception — a connection
-cannot be built without a `Grant`, a channel name cannot either, and the tenant
-is taken from the Grant rather than from the wire.
+The process is configured by the environment alone, and four variables have no
+default it could invent:
 
-The transport is the `ws` subpackage: this project's own RFC 6455, not a fork
-and with no borrowed code. It is why this repository takes no third-party
-dependency at all.
+```sh
+JOAJU_APP_ID=app JOAJU_APP_KEY=key JOAJU_APP_SECRET=secret JOAJU_TENANT=acme \
+  go run github.com/arandu-io/joaju/cmd/joaju@latest
+```
 
-It is written, and `go build`, `go vet` and `go test -race` are green. The
-Autobahn conformance suite has not been run against it yet.
+The rest are in [`cmd/joaju/config.go`](cmd/joaju/config.go), each with what it
+means and what leaving it out means.
+
+## What is not here yet
+
+- **No view.** `Counter` keeps per-tenant totals, and nothing displays them:
+  there is no dashboard and no kyse component for a connection or a message.
+- **No client.** Nothing in this repository is served to a browser. The shape is
+  decided — vendored, by `go:embed`, under `script-src 'self'` — and unwritten.
+- **The process runs alone.** `cmd/joaju` builds its server with no `Relay`, so
+  a publish reaches the sockets it holds and the metrics routes answer for it
+  alone. A second instance needs the library, a bus and the wiring by hand.
+- **The process has no people.** It authenticates the application by its app
+  secret and a browser not at all, so a private or presence channel there is
+  reached by offering the Pusher subscription signature, which the policy
+  recomputes. A mounted server decides in its own policy and ignores it.
+- **No compression**, which is why `12.*` and `13.*` are excluded above; **no
+  TLS**, held by a reverse proxy in front; **one application per process**; and
+  no cross-origin socket, since the handshake's same-origin check has no setting
+  that widens it and an origin allowlist only narrows it further.
+
+## The rest of Arandu
+
+[`arandu-io/hesape`](https://github.com/arandu-io/hesape) is where `auth.Grant`,
+`auth.Policy` and the channel vocabulary this server shares with the SSE fanout
+come from, and its `redis` module is the connection the bus borrows rather than
+opening a second one. `framework` is process bootstrap and typed configuration,
+`arandu` is the project skeleton that mounts this, and `aru` is the command
+line.
 
 ## Learning Arandu
 
