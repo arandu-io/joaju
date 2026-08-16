@@ -108,4 +108,12 @@
 // costs less than carrying a library's client stack, proxy support and
 // compression -- and less than tracking somebody else's security advisories
 // forever (ADR 0052).
+//
+// # The other end
+//
+// Subpackage client is the browser half: the JavaScript that speaks this
+// protocol from a page, embedded and served rather than fetched from npm or a
+// CDN (ADR 0052, RULE 13). It is not routed by [Server] and the reason is in its
+// own documentation -- the script has to be served from the origin the PAGE is
+// on, and a socket server is frequently not that origin.
 package joaju
