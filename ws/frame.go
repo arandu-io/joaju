@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"io"
 	"math/rand/v2"
+	"unicode/utf8"
 )
 
 // The frame opcodes of RFC 6455 section 5.2.
@@ -403,6 +404,11 @@ func ParseClose(payload []byte) (code int, reason string, err error) {
 // The reason is truncated to fit the 125-byte control limit rather than
 // refused. A close that fails to send because its explanation was too long
 // leaves the peer with no explanation at all, which is worse than a short one.
+//
+// It is truncated at a rune boundary, and the RFC is why: a close reason is
+// held to the same UTF-8 rule as a text message, so a cut that lands inside a
+// rune turns an explanation into a frame the peer must fail the connection
+// over. The reason gets shorter by up to three bytes; nothing else changes.
 func FormatClose(code int, reason string) []byte {
 	if code == CloseNoStatusReceived {
 		return nil
@@ -413,6 +419,15 @@ func FormatClose(code int, reason string) []byte {
 	room := maxControlPayload - 2
 	if len(reason) > room {
 		reason = reason[:room]
+		for len(reason) > 0 {
+			// A lone RuneError of one byte is the cut showing: the rune it ends
+			// in is not there any more. One that is three bytes long was in the
+			// text to begin with, and stays.
+			if r, size := utf8.DecodeLastRuneInString(reason); r != utf8.RuneError || size > 1 {
+				break
+			}
+			reason = reason[:len(reason)-1]
+		}
 	}
 	return append(payload, reason...)
 }

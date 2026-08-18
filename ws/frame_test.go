@@ -243,6 +243,31 @@ func TestFormatCloseTruncatesTheReasonToFitAControlFrame(t *testing.T) {
 	}
 }
 
+// TestFormatCloseTruncatesAtARuneBoundary is the same truncation on text that
+// is not ASCII, where cutting at byte 123 lands inside a rune.
+//
+// The peer holds a close reason to the same UTF-8 rule as a text message, so
+// half a rune in a close frame is a connection failed with 1007 -- over the
+// frame that was explaining why the connection was ending.
+func TestFormatCloseTruncatesAtARuneBoundary(t *testing.T) {
+	payload := FormatClose(ClosePolicyViolation, strings.Repeat("é", 90))
+
+	if len(payload) > maxControlPayload {
+		t.Fatalf("the payload is %d bytes, want at most %d", len(payload), maxControlPayload)
+	}
+
+	code, reason, err := ParseClose(payload)
+	if err != nil {
+		t.Fatalf("reading back a truncated reason = %v", err)
+	}
+	if code != ClosePolicyViolation {
+		t.Fatalf("the code came back as %d", code)
+	}
+	if !strings.HasPrefix(strings.Repeat("é", 90), reason) {
+		t.Fatalf("the truncated reason %q is not a prefix of what was formatted", reason)
+	}
+}
+
 // TestMaskIsItsOwnInverse is the property the RFC relies on, and the reason
 // unmasking on read and masking on write are the same function.
 func TestMaskIsItsOwnInverse(t *testing.T) {

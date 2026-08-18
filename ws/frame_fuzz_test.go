@@ -167,6 +167,12 @@ func FuzzFormatClose(f *testing.F) {
 	f.Add(CloseNoStatusReceived, "ignored")
 	f.Add(CloseInternalServerErr, strings.Repeat("e", 200))
 	f.Add(CloseProtocolError, strings.Repeat("é", 40))
+	// Two reasons whose truncation lands inside a rune, one two bytes wide and
+	// one four. Coverage does not lead here on its own: the branch that
+	// truncates is already reached by a reason of plain ASCII, and what is
+	// wrong with these is the byte the cut falls on rather than the branch.
+	f.Add(ClosePolicyViolation, strings.Repeat("é", 90))
+	f.Add(CloseMessageTooBig, strings.Repeat("💡", 40))
 	f.Add(4000, "aplicação")
 
 	f.Fuzz(func(t *testing.T, code int, reason string) {
