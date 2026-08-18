@@ -1,0 +1,4 @@
+go test fuzz v1
+[]byte("\x01\x7f00000000")
+bool(false)
+int64(-23)

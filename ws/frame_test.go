@@ -3,6 +3,7 @@ package ws
 import (
 	"bytes"
 	"errors"
+	"io"
 	"strings"
 	"testing"
 )
@@ -136,6 +137,27 @@ func TestReadFrameRefusesAnOversizedHeaderWithoutAllocating(t *testing.T) {
 	_, err := ReadFrame(bytes.NewReader(header), true, 1024)
 	if !errors.Is(err, ErrTooLarge) {
 		t.Fatalf("a header declaring a gigabyte against a 1 KB limit = %v, want %v", err, ErrTooLarge)
+	}
+}
+
+// TestReadFrameDoesNotBelieveADeclaredLengthWithNoLimit is the same refusal
+// where there is no limit to refuse with.
+//
+// A connection with no read limit is not exotic: it is what [Dialer.Dial]
+// returns, and it is what a caller gets by not calling SetReadLimit. The header
+// below is nine bytes and declares three exabytes, and the only reason it may
+// not be believed is that nothing arrived to back it up.
+func TestReadFrameDoesNotBelieveADeclaredLengthWithNoLimit(t *testing.T) {
+	header := []byte{0x82, 0x7f, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30}
+
+	for _, limit := range []int64{0, -1} {
+		_, err := ReadFrame(bytes.NewReader(header), false, limit)
+		if err == nil {
+			t.Fatalf("a header declaring three exabytes was accepted with limit %d", limit)
+		}
+		if !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
+			t.Fatalf("reading it with limit %d = %v, want the stream to have ended", limit, err)
+		}
 	}
 }
 

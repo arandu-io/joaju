@@ -136,6 +136,10 @@ func (f Frame) Control() bool { return f.Opcode >= CloseMessage }
 // limit bounds the payload. It is checked against the length the peer declared,
 // BEFORE anything is allocated -- a header claiming eight exabytes must cost a
 // refusal and not an allocation.
+//
+// Zero or less is no limit, and then the declared length is nothing but the
+// peer's word: the payload is assembled as its bytes arrive, so the memory
+// follows what was actually sent rather than what was announced.
 func ReadFrame(r io.Reader, fromClient bool, limit int64) (Frame, error) {
 	var head [2]byte
 	if _, err := io.ReadFull(r, head[:]); err != nil {
@@ -206,8 +210,10 @@ func ReadFrame(r io.Reader, fromClient bool, limit int64) (Frame, error) {
 		}
 	}
 
-	payload := make([]byte, length)
-	if _, err := io.ReadFull(r, payload); err != nil {
+	// The limit, when there is one, has already accepted this length, and that
+	// is what makes it safe to allocate it in one go.
+	payload, err := readPayload(r, length, limit > 0)
+	if err != nil {
 		return Frame{}, err
 	}
 	if masked {
@@ -215,6 +221,53 @@ func ReadFrame(r io.Reader, fromClient bool, limit int64) (Frame, error) {
 	}
 
 	return Frame{Final: final, Opcode: opcode, Payload: payload}, nil
+}
+
+// payloadChunk is how much of an unvouched payload is read at a time.
+//
+// Thirty-two kilobytes: large enough that a message of any ordinary size costs
+// a handful of reads, small enough that a peer which declares a payload and
+// sends nothing has bought thirty-two kilobytes and not a terabyte.
+const payloadChunk = 32 << 10
+
+// readPayload reads n bytes of application data.
+//
+// vouched says a limit has already accepted n, so the buffer may be allocated
+// at that size in one call. Without it n is only what the peer wrote in a
+// header nine bytes long, and the value that header can carry is four
+// exabytes -- so the buffer grows with the bytes that actually arrive, and a
+// declared length nobody sends the bytes for costs one chunk.
+func readPayload(r io.Reader, n int64, vouched bool) ([]byte, error) {
+	if vouched || n <= payloadChunk {
+		payload := make([]byte, n)
+		if _, err := io.ReadFull(r, payload); err != nil {
+			return nil, err
+		}
+
+		return payload, nil
+	}
+
+	payload := make([]byte, 0, payloadChunk)
+	chunk := make([]byte, payloadChunk)
+	for int64(len(payload)) < n {
+		want := n - int64(len(payload))
+		if want > payloadChunk {
+			want = payloadChunk
+		}
+
+		if _, err := io.ReadFull(r, chunk[:want]); err != nil {
+			if len(payload) > 0 && errors.Is(err, io.EOF) {
+				// The stream ended between two chunks, which for the caller is
+				// the same short frame as one that ended inside a chunk.
+				err = io.ErrUnexpectedEOF
+			}
+
+			return nil, err
+		}
+		payload = append(payload, chunk[:want]...)
+	}
+
+	return payload, nil
 }
 
 // WriteFrame writes one frame.

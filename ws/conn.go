@@ -126,8 +126,9 @@ const defaultBufferSize = 4096
 //
 // Zero is no limit. The limit is checked against the length the peer declared in
 // the header, so an oversized message costs a refusal and never an allocation --
-// which is the point: without it, a header claiming a terabyte is a header that
-// allocates a terabyte.
+// which is the point: without it there is nothing to refuse the message with,
+// and a peer that declares a terabyte holds the connection open for as long as
+// it keeps sending one.
 func (c *Conn) SetReadLimit(n int64) { c.readLimit = n }
 
 // SetReadDeadline is the net.Conn deadline, and it is how a dead peer is
