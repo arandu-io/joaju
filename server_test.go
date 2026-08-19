@@ -1046,6 +1046,49 @@ func TestServerRefusesTheFramesPastTheSocketsRateLimit(t *testing.T) {
 	}
 }
 
+// The protocol is JSON over text frames, and a binary one carrying the same
+// JSON would be a second way to send every message there is.
+//
+// The frame is dropped and the socket stays, which is what happens to every
+// other frame this server cannot act on.
+func TestServerDropsAFrameThatIsNotText(t *testing.T) {
+	f := newServerFixture(t, joaju.ServerConfig{})
+
+	conn, _, err := f.dial(t, "http://"+f.host(t))
+	if err != nil {
+		t.Fatalf("dialling = %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+	f.skipOpenFrame(t, conn)
+
+	// Bytes a text frame would have carried through, so what is being refused
+	// is the framing and not the content.
+	const binary = `{"event":"pusher:ping"}`
+	if err := conn.WriteMessage(ws.BinaryMessage, []byte(binary)); err != nil {
+		t.Fatalf("writing a binary frame = %v", err)
+	}
+
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	_, message, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatalf("reading the answer to a binary frame = %v", err)
+	}
+	if want := encode(t, joaju.ErrInvalidMessage.Frame()); string(message) != want {
+		t.Fatalf("the answer to a binary frame was %s, want %s", message, want)
+	}
+
+	// The same bytes in a text frame do reach the Protocol, and the one sent
+	// before them never did.
+	const text = `{"event":"pusher:pong"}`
+	if err := conn.WriteMessage(ws.TextMessage, []byte(text)); err != nil {
+		t.Fatalf("writing the text frame after the binary one = %v", err)
+	}
+	held := f.waitFor(t, text)
+	if len(held) != 1 || held[0] != text {
+		t.Fatalf("the protocol was handed %v, want only %s: a binary frame reached the protocol, or the socket did not survive the refusal", held, text)
+	}
+}
+
 // Under the limit nothing happens at all: every frame reaches the Protocol and
 // the client is told nothing.
 func TestServerLeavesASocketUnderItsRateLimitAlone(t *testing.T) {

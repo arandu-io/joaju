@@ -62,11 +62,13 @@ const (
 // The server owns the socket -- the upgrade, the two goroutines, the deadlines,
 // the registry -- and owns no part of the Pusher protocol. It sends no frame of
 // its own, not even [EventConnectionEstablished], because a second place that
-// builds a frame is a second answer to what a frame looks like. The one it
-// does put on the wire is a refusal this package already declared and only
-// encodes -- [ErrRateLimited], when [ServerConfig.MaxMessagesPerSecond] is what
-// dropped the frame -- because that limit is the socket's and a Protocol cannot
-// answer for a frame it was never handed.
+// builds a frame is a second answer to what a frame looks like. The two it does
+// put on the wire are refusals this package already declared and it only
+// encodes, and both are frames a Protocol was never handed and could not answer
+// for: [ErrRateLimited] when [ServerConfig.MaxMessagesPerSecond] dropped the
+// frame, because that limit is the socket's, and [ErrInvalidMessage] when the
+// frame was not a text one, because the opcode is the transport's and stops
+// here.
 //
 // There are three methods and no fourth for reporting an error: the error comes
 // back from the call that failed.
@@ -623,7 +625,7 @@ func (s *Server) read(r *http.Request, conn *Connection, socket *ws.Conn) {
 	limiter := newRateLimiter(s.maxMessagesPerSecond, time.Now())
 
 	for {
-		_, message, err := socket.ReadMessage()
+		kind, message, err := socket.ReadMessage()
 		if err != nil {
 			if ws.IsUnexpectedClose(err, ws.CloseNormalClosure, ws.CloseGoingAway) {
 				s.log.InfoContext(ctx, "joaju: the socket ended",
@@ -643,6 +645,23 @@ func (s *Server) read(r *http.Request, conn *Connection, socket *ws.Conn) {
 				slog.String("socket", string(conn.ID())),
 				slog.Int("limit", s.maxMessagesPerSecond))
 			_ = conn.Send(ctx, rateLimitedFrame)
+			continue
+		}
+
+		// The opcode is read here and nowhere else, because it is the last
+		// thing about a frame that is the transport's and this is where the
+		// transport ends. [Protocol.Message] is handed bytes and cannot see
+		// what framed them.
+		//
+		// The protocol is JSON over text frames. A binary frame carrying the
+		// same JSON would be a second way to send every message there is: two
+		// framings to read, two to test, and the one nobody thought about is
+		// the one a client reaches for. It is dropped and the socket stays,
+		// which is what happens to every other frame this server cannot act on.
+		if kind != ws.TextMessage {
+			s.log.InfoContext(ctx, "joaju: a frame was dropped because it was not text",
+				slog.String("socket", string(conn.ID())), slog.Int("opcode", kind))
+			_ = conn.Send(ctx, invalidMessageFrame)
 			continue
 		}
 
@@ -1285,14 +1304,17 @@ func (k *sink) flush() {
 	}
 }
 
-// rateLimitedFrame is [ErrRateLimited] on the wire, encoded once for the
+// The two refusals the [Server] puts on the wire itself, encoded once for the
 // process.
 //
 // The error is discarded for the reason [ProtocolError.Frame] discards its own:
 // an event name and a struct of an int and a string have no encoding that can
-// fail. Encoding it per refusal would spend the most work on the socket this
+// fail. Encoding one per refusal would spend the most work on the socket this
 // exists to spend less on.
-var rateLimitedFrame, _ = Encode(ErrRateLimited.Frame())
+var (
+	rateLimitedFrame, _    = Encode(ErrRateLimited.Frame())
+	invalidMessageFrame, _ = Encode(ErrInvalidMessage.Frame())
+)
 
 // rateLimiter meters one socket's inbound frames, and is the whole of
 // [ServerConfig.MaxMessagesPerSecond].
