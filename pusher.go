@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/arandu-io/hesape/auth"
 )
@@ -271,11 +272,25 @@ func Encode(f Frame) ([]byte, error) { return json.Marshal(f) }
 
 // Decode reads one frame off a socket.
 //
+// It refuses a message that is not UTF-8, which json.Unmarshal alone would
+// accept: the decoder replaces each byte it cannot read with U+FFFD, silently,
+// three bytes out for one in. That is not a formatting detail here, because the
+// strings in a frame are identifiers, and every unreadable byte becomes the same
+// rune. A channel name is the key a channel is held under and the name a policy
+// is asked about, so two clients of one tenant asking for two different names
+// would be asking for the same one; the name that goes back in the confirmation
+// is not the name that was asked for; and a signature computed over the name the
+// client sent cannot match the name this server ended up with.
+//
 // It refuses a frame with no event name, which json.Unmarshal alone would
 // accept, and it refuses it as [ErrInvalidMessage] -- so the caller can hand
 // the error straight to [ErrorFrame] and the client is told 4200 rather than
 // the parser's complaint about byte 31.
 func Decode(message []byte) (Frame, error) {
+	if !utf8.Valid(message) {
+		return Frame{}, fmt.Errorf("%w: the frame is not UTF-8", ErrInvalidMessage)
+	}
+
 	var f Frame
 	if err := json.Unmarshal(message, &f); err != nil {
 		return Frame{}, fmt.Errorf("%w: %v", ErrInvalidMessage, err)

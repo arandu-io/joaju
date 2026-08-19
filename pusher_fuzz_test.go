@@ -7,6 +7,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/arandu-io/hesape/auth"
 	"github.com/arandu-io/hesape/broadcasting"
@@ -231,7 +232,12 @@ func FuzzSubscribeRequest(f *testing.F) {
 		if request.Channel == "" {
 			t.Fatal("an accepted subscription names no channel")
 		}
-		if size := len(request.Channel) + len(request.Auth) + len(request.ChannelData); size > len(data) {
+		// The size is asserted over the data a frame can actually carry. A JSON
+		// decoder widens every byte it cannot read into U+FFFD, three bytes out
+		// for one in, and [Decode] refuses a message carrying such a byte -- so
+		// the data that reaches here off a socket is always UTF-8, and a caller
+		// reaching this function directly is the only way to the other case.
+		if size := len(request.Channel) + len(request.Auth) + len(request.ChannelData); utf8.Valid(data) && size > len(data) {
 			t.Fatalf("a request of %d bytes came out of %d bytes of input", size, len(data))
 		}
 		if len(request.ChannelData) > 0 && !json.Valid(request.ChannelData) {

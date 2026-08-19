@@ -137,6 +137,47 @@ func TestDecodeRefusesAMessageItCannotRead(t *testing.T) {
 	}
 }
 
+// TestDecodeRefusesAMessageThatIsNotUTF8 covers the bytes a JSON decoder would
+// have read anyway, by replacing each of them.
+//
+// The message is well-formed JSON in every other respect, so nothing but the
+// encoding refuses it.
+func TestDecodeRefusesAMessageThatIsNotUTF8(t *testing.T) {
+	cases := map[string]string{
+		"in the event name":   "{\"event\":\"\xac\xac\"}",
+		"in a channel name":   "{\"event\":\"pusher:subscribe\",\"channel\":\"private-\xeb\"}",
+		"in the data":         "{\"event\":\"client-typing\",\"data\":\"\xff\"}",
+		"a truncated rune":    "{\"event\":\"\xf0\x9f\x92\"}",
+		"a bare continuation": "{\"event\":\"a\x80b\"}",
+	}
+
+	for name, message := range cases {
+		t.Run(name, func(t *testing.T) {
+			_, err := joaju.Decode([]byte(message))
+			if !errors.Is(err, joaju.ErrInvalidMessage) {
+				t.Fatalf("Decode(%q) = %v, want ErrInvalidMessage", message, err)
+			}
+		})
+	}
+}
+
+// TestDecodeKeepsTwoChannelNamesApart is what the encoding check is for.
+//
+// A JSON decoder maps every byte it cannot read onto one replacement rune, so
+// two clients asking for two different channels would be asking for the same
+// one. The name is the key a channel is held under, and sharing it is sharing
+// the events on it.
+func TestDecodeKeepsTwoChannelNamesApart(t *testing.T) {
+	one := "{\"event\":\"pusher:subscribe\",\"data\":{\"channel\":\"private-\xac\"}}"
+	other := "{\"event\":\"pusher:subscribe\",\"data\":{\"channel\":\"private-\xeb\"}}"
+
+	first, firstErr := joaju.Decode([]byte(one))
+	second, secondErr := joaju.Decode([]byte(other))
+	if firstErr == nil || secondErr == nil {
+		t.Fatalf("Decode() accepted %+v and %+v, and the two channels differ only in a byte neither is", first, second)
+	}
+}
+
 func TestFrameRoundTrips(t *testing.T) {
 	want := joaju.Frame{
 		Event:   "client-typing",
