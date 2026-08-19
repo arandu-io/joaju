@@ -15,4 +15,4 @@ go 1.26
 // to a channel is a read and RULE 17 has no exception, and redis for the
 // pub/sub that lets two instances agree on who is connected where.
 
-require github.com/arandu-io/hesape v0.8.0
+require github.com/arandu-io/hesape v0.9.0
