@@ -80,6 +80,7 @@ func TestLoadConfigLeavesTheLibrarysDefaultsToTheLibrary(t *testing.T) {
 	// read the default from -- and the one the reader does not look at.
 	if cfg.MaxMessageSize != 0 || cfg.MaxBodySize != 0 || cfg.OutboundQueue != 0 ||
 		cfg.MaxConnections != 0 || cfg.MaxMessagesPerSecond != 0 ||
+		cfg.MaxChannelsPerConnection != 0 ||
 		cfg.WriteTimeout != 0 || cfg.PingInterval != 0 || cfg.PongTimeout != 0 {
 		t.Fatalf("a limit was filled in here instead of by joaju.NewServer: %+v", cfg)
 	}
@@ -106,19 +107,20 @@ func TestLoadConfigReadsEveryVariable(t *testing.T) {
 
 	vars := identity()
 	for name, value := range map[string]string{
-		"JOAJU_ADDR":                    "127.0.0.1:9000",
-		"JOAJU_ALLOWED_ORIGINS":         " https://app.example.com , https://admin.example.com ,",
-		"JOAJU_CLIENT_EVENTS":           "true",
-		"JOAJU_MAX_MESSAGE_SIZE":        "20480",
-		"JOAJU_MAX_BODY_SIZE":           "2097152",
-		"JOAJU_OUTBOUND_QUEUE":          "128",
-		"JOAJU_MAX_CONNECTIONS":         "-1",
-		"JOAJU_MAX_MESSAGES_PER_SECOND": "30",
-		"JOAJU_WRITE_TIMEOUT":           "5s",
-		"JOAJU_PING_INTERVAL":           "20s",
-		"JOAJU_PONG_TIMEOUT":            "1m",
-		"JOAJU_SHUTDOWN_TIMEOUT":        "30s",
-		"JOAJU_LOG_LEVEL":               "debug",
+		"JOAJU_ADDR":                        "127.0.0.1:9000",
+		"JOAJU_ALLOWED_ORIGINS":             " https://app.example.com , https://admin.example.com ,",
+		"JOAJU_CLIENT_EVENTS":               "true",
+		"JOAJU_MAX_MESSAGE_SIZE":            "20480",
+		"JOAJU_MAX_BODY_SIZE":               "2097152",
+		"JOAJU_OUTBOUND_QUEUE":              "128",
+		"JOAJU_MAX_CONNECTIONS":             "-1",
+		"JOAJU_MAX_MESSAGES_PER_SECOND":     "30",
+		"JOAJU_MAX_CHANNELS_PER_CONNECTION": "25",
+		"JOAJU_WRITE_TIMEOUT":               "5s",
+		"JOAJU_PING_INTERVAL":               "20s",
+		"JOAJU_PONG_TIMEOUT":                "1m",
+		"JOAJU_SHUTDOWN_TIMEOUT":            "30s",
+		"JOAJU_LOG_LEVEL":                   "debug",
 	} {
 		vars[name] = value
 	}
@@ -141,8 +143,8 @@ func TestLoadConfigReadsEveryVariable(t *testing.T) {
 	if cfg.MaxMessageSize != 20480 || cfg.MaxBodySize != 2097152 {
 		t.Errorf("sizes = %d and %d", cfg.MaxMessageSize, cfg.MaxBodySize)
 	}
-	if cfg.OutboundQueue != 128 || cfg.MaxMessagesPerSecond != 30 {
-		t.Errorf("counts = %d and %d", cfg.OutboundQueue, cfg.MaxMessagesPerSecond)
+	if cfg.OutboundQueue != 128 || cfg.MaxMessagesPerSecond != 30 || cfg.MaxChannelsPerConnection != 25 {
+		t.Errorf("counts = %d, %d and %d", cfg.OutboundQueue, cfg.MaxMessagesPerSecond, cfg.MaxChannelsPerConnection)
 	}
 	// Negative is the way to say no limit at all, and it takes writing -1 rather
 	// than leaving a variable out.
@@ -167,14 +169,15 @@ func TestLoadConfigRefusesAValueItCannotRead(t *testing.T) {
 	// running a configuration nobody wrote. Every one of these is a refusal to
 	// start, and every message names the variable.
 	for name, value := range map[string]string{
-		"JOAJU_MAX_MESSAGE_SIZE":        "10kb",
-		"JOAJU_MAX_BODY_SIZE":           "-1",
-		"JOAJU_OUTBOUND_QUEUE":          "many",
-		"JOAJU_MAX_MESSAGES_PER_SECOND": "30/s",
-		"JOAJU_WRITE_TIMEOUT":           "5",
-		"JOAJU_PING_INTERVAL":           "-20s",
-		"JOAJU_CLIENT_EVENTS":           "yes please",
-		"JOAJU_LOG_LEVEL":               "chatty",
+		"JOAJU_MAX_MESSAGE_SIZE":            "10kb",
+		"JOAJU_MAX_BODY_SIZE":               "-1",
+		"JOAJU_OUTBOUND_QUEUE":              "many",
+		"JOAJU_MAX_MESSAGES_PER_SECOND":     "30/s",
+		"JOAJU_MAX_CHANNELS_PER_CONNECTION": "a hundred",
+		"JOAJU_WRITE_TIMEOUT":               "5",
+		"JOAJU_PING_INTERVAL":               "-20s",
+		"JOAJU_CLIENT_EVENTS":               "yes please",
+		"JOAJU_LOG_LEVEL":                   "chatty",
 	} {
 		t.Run(name+"="+value, func(t *testing.T) {
 			t.Parallel()

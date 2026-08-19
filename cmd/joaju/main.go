@@ -211,8 +211,9 @@ func frameLayer(broker joaju.Broker, subscribe joaju.SubscriptionPolicy, cfg con
 		// clients put at 120 seconds -- four times this server's deadline, so
 		// every idle socket would be hung up on before the client thought to
 		// ping.
-		ActivityTimeout: activityTimeout(cfg.PongTimeout),
-		ClientEvents:    cfg.ClientEvents,
+		ActivityTimeout:          activityTimeout(cfg.PongTimeout),
+		ClientEvents:             cfg.ClientEvents,
+		MaxChannelsPerConnection: cfg.MaxChannelsPerConnection,
 	})
 }
 

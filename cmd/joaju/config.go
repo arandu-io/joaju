@@ -102,6 +102,11 @@ type config struct {
 	PingInterval         time.Duration
 	PongTimeout          time.Duration
 
+	// MaxChannelsPerConnection is the protocol's limit rather than the socket's,
+	// so it is passed to [joaju.PusherConfig] and not to the server. Zero is
+	// [joaju.DefaultMaxChannelsPerConnection] and a negative number is no limit.
+	MaxChannelsPerConnection int
+
 	// ShutdownTimeout is the deadline the signal handler works to. Zero means
 	// [defaultShutdownTimeout].
 	ShutdownTimeout time.Duration
@@ -179,6 +184,9 @@ func loadConfig(env environment) (config, error) {
 		return config{}, err
 	}
 	if cfg.MaxMessagesPerSecond, err = env.count("MAX_MESSAGES_PER_SECOND"); err != nil {
+		return config{}, err
+	}
+	if cfg.MaxChannelsPerConnection, err = env.count("MAX_CHANNELS_PER_CONNECTION"); err != nil {
 		return config{}, err
 	}
 	if cfg.WriteTimeout, err = env.duration("WRITE_TIMEOUT"); err != nil {
