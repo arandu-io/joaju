@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/arandu-io/hesape/auth"
 	"github.com/arandu-io/hesape/broadcasting"
@@ -39,6 +40,33 @@ const (
 	// PresenceCacheChannelPrefix marks a cache channel that publishes its
 	// members.
 	PresenceCacheChannelPrefix = broadcasting.PresenceChannelPrefix + CacheChannelPrefix
+)
+
+// What a channel name may be, which [NewChannelName] enforces.
+//
+// Both are the protocol's own, so a name this package refuses is a name no
+// client of the protocol was going to send and no other server of it would have
+// accepted. They are not a second opinion about the tenant: the separator is
+// refused before either of these is reached, and it is not in the set below
+// anyway.
+const (
+	// MaxChannelNameLength is the longest name a channel may have, prefix
+	// counted -- "private-cache-" spends fourteen of it.
+	//
+	// Without the limit the only ceiling is [DefaultMaxMessageSize], and a name
+	// at that ceiling is not paid for once: it is held in the channel the
+	// [Broker] keeps, in the key the subscription is recorded under and in the
+	// [ChannelName] beside it, for as long as the subscription lasts. Measured
+	// on one socket, a subscription to a name at the message limit costs some
+	// 36 KiB of heap where one at this limit costs some 650 bytes.
+	MaxChannelNameLength = 164
+	// ChannelNameCharacters is every character a name may hold, besides the
+	// letters and the digits.
+	//
+	// It is a small set and that is the point: a name reaches a log line, a
+	// metrics label, a Redis channel and a URL path, and the characters that
+	// mean something in one of those are the ones missing from here.
+	ChannelNameCharacters = "_-=@,.;"
 )
 
 // The two reserved namespaces of the Pusher protocol.
@@ -105,6 +133,15 @@ var ErrNoGrant = fmt.Errorf("%w: joaju: no grant", auth.ErrForbidden)
 // It is not an auth.ErrForbidden. Nothing was refused on authority -- the same
 // client with the same Grant is admitted the moment somebody disconnects.
 var ErrConnectionLimit = errors.New("joaju: this tenant is holding as many connections as it may")
+
+// ErrChannelName is what [NewChannelName] answers for a name outside what the
+// protocol carries: one longer than [MaxChannelNameLength], or one holding a
+// character that is not in [ChannelNameCharacters].
+//
+// It is not an auth.ErrForbidden. Nothing was refused on authority -- the name
+// is one no client of this protocol could be answered about, whoever asked for
+// it -- so it reaches the client as [ErrInvalidMessage] and not as a denial.
+var ErrChannelName = errors.New("joaju: the channel name is not one this protocol carries")
 
 // ErrWrongTenant is what a [Broker] answers when the Grant it was handed and
 // the [ChannelName] it was handed disagree about whose channel it is.
@@ -245,14 +282,34 @@ type ChannelName struct {
 // client that names one is a client choosing whose events it hears. The Grant
 // is refused if it carries no tenant, or one that cannot be a namespace.
 //
-// Both refusals are broadcasting.RequestedChannel and
+// Those refusals are broadcasting.RequestedChannel and
 // broadcasting.TenantChannel doing the work, because the SSE fanout already
 // authenticates channel names and two definitions of a valid one are how the
-// looser of the two gets found.
+// looser of the two gets found. What this adds on top is not a second opinion
+// about the same question but the shape this protocol's names have and the
+// other's do not: [MaxChannelNameLength] and [ChannelNameCharacters], answered
+// with [ErrChannelName].
+//
+// The length is counted in bytes and the protocol counts characters, which is
+// the same count for every name that gets through: nothing in
+// [ChannelNameCharacters] takes more than one byte, so a name that is over the
+// limit in bytes and under it in characters is one the character set refuses
+// either way.
 func NewChannelName(g auth.Grant, requested string) (ChannelName, error) {
 	c, err := broadcasting.RequestedChannel(requested)
 	if err != nil {
 		return ChannelName{}, err
+	}
+	// Reported by length and not by content: this is the one refusal a name of
+	// [DefaultMaxMessageSize] reaches, and quoting it would put the whole thing
+	// in a log line for every frame a client cared to send.
+	if len(c.Name) > MaxChannelNameLength {
+		return ChannelName{}, fmt.Errorf("%w: it is %d bytes and %d is the most", ErrChannelName, len(c.Name), MaxChannelNameLength)
+	}
+	if i := strings.IndexFunc(c.Name, notChannelCharacter); i >= 0 {
+		r, _ := utf8.DecodeRuneInString(c.Name[i:])
+
+		return ChannelName{}, fmt.Errorf("%w: %q holds %q, which is not one of the letters, the digits or %q", ErrChannelName, c.Name, r, ChannelNameCharacters)
 	}
 	// The result is discarded and the error is not: this call is here to run
 	// the tenant half of the same rule -- a Grant with no tenant, or with one
@@ -264,6 +321,18 @@ func NewChannelName(g auth.Grant, requested string) (ChannelName, error) {
 	}
 
 	return ChannelName{tenant: auth.Tenant(g), requested: c.Name}, nil
+}
+
+// notChannelCharacter reports whether r may not appear in a channel name, which
+// is the sense strings.IndexFunc wants: it answers where the first offending
+// character is, and a name with none of them is the name that is allowed.
+func notChannelCharacter(r rune) bool {
+	switch {
+	case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		return false
+	}
+
+	return !strings.ContainsRune(ChannelNameCharacters, r)
 }
 
 // Tenant is whose channel this is. It came from the Grant and from nowhere

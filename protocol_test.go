@@ -529,6 +529,34 @@ func TestPusherRefusesAChannelNameThatCarriesATenant(t *testing.T) {
 	}
 }
 
+// The name limits over a real socket: what a client sends is what a client is
+// refused for, and the socket it was refused on is still usable.
+func TestPusherRefusesAChannelNameOutsideWhatTheProtocolCarries(t *testing.T) {
+	f := newProtocolFixture(t, joaju.PusherConfig{})
+	conn, _ := f.open(t)
+
+	// A name that fills the frame, which is what a client could send before the
+	// message limit was the only ceiling on one.
+	envelope := len(`{"event":"pusher:subscribe","data":{"channel":""}}`)
+	for _, requested := range []string{
+		strings.Repeat("z", int(joaju.DefaultMaxMessageSize)-envelope),
+		strings.Repeat("z", joaju.MaxChannelNameLength+1),
+		"private-#internal",
+	} {
+		protocolSend(t, conn, `{"event":"pusher:subscribe","data":{"channel":"`+requested+`"}}`)
+		if code, _ := protocolRefusal(t, conn); code != joaju.CodeInvalidMessage {
+			t.Fatalf("a channel name of %d bytes answered %d, want %d", len(requested), code, joaju.CodeInvalidMessage)
+		}
+	}
+	if asked := f.policy.seen(); len(asked) != 0 {
+		t.Fatalf("the policy was asked about %v, want nothing: the name was refused before it existed", asked)
+	}
+
+	// The socket is still a socket, and a name the protocol does carry still
+	// works on it.
+	protocolSubscribe(t, conn, "private-"+strings.Repeat("z", joaju.MaxChannelNameLength-len("private-")))
+}
+
 func TestPusherAnswersAPingAndSaysNothingToAPong(t *testing.T) {
 	f := newProtocolFixture(t, joaju.PusherConfig{})
 	conn, _ := f.open(t)

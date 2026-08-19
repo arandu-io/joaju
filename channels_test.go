@@ -192,6 +192,58 @@ func TestChannelRefusesAClientThatNamesAnotherTenant(t *testing.T) {
 	}
 }
 
+// The protocol's ceiling on a name, which is what stands between one authorized
+// socket and a channel the size of the message limit.
+func TestNewChannelNameRefusesANameLongerThanTheProtocolCarries(t *testing.T) {
+	g := channelTestJoinGrant(t, "acme", "u1")
+
+	longest := strings.Repeat("a", MaxChannelNameLength)
+	if _, err := NewChannelName(g, longest); err != nil {
+		t.Fatalf("naming a channel of %d characters, which is the most the protocol carries: %v", MaxChannelNameLength, err)
+	}
+
+	// One character past it, and every length up to what a frame can hold.
+	for _, n := range []int{MaxChannelNameLength + 1, 1024, 10 << 10} {
+		_, err := NewChannelName(g, strings.Repeat("a", n))
+		if err == nil {
+			t.Fatalf("a channel name of %d characters was accepted, and %d is the most the protocol carries: the only ceiling left is the message limit, and the name is held for as long as the subscription is", n, MaxChannelNameLength)
+		}
+		if !errors.Is(err, ErrChannelName) {
+			t.Fatalf("a name of %d characters was refused for the wrong reason: %v", n, err)
+		}
+	}
+}
+
+// The set a name is spelled from, which is what keeps a channel name from
+// meaning something to whatever it is written into.
+func TestNewChannelNameRefusesACharacterTheProtocolHasNoRoomFor(t *testing.T) {
+	g := channelTestJoinGrant(t, "acme", "u1")
+
+	spelled := "private-cache-Orders_17=v2@acme,eu.west;1-2"
+	if _, err := NewChannelName(g, spelled); err != nil {
+		t.Fatalf("naming %q, which is letters, digits and %q: %v", spelled, ChannelNameCharacters, err)
+	}
+
+	for _, requested := range []string{
+		"private-#internal",  // reserved by the protocol for itself
+		"orders 17",          // a space, which a metrics label splits on
+		"orders\n17",         // a newline, which a log line ends on
+		"orders/17",          // a separator, which a URL path cuts on
+		"orders*",            // a glob, which a subscriber pattern reads
+		"private-\x00orders", // a terminator
+		"private-étage",      // a letter outside the set
+		"private-orders​",    // a space that does not look like one
+	} {
+		_, err := NewChannelName(g, requested)
+		if err == nil {
+			t.Fatalf("the channel name %q was accepted, and it is not spelled from the letters, the digits and %q", requested, ChannelNameCharacters)
+		}
+		if !errors.Is(err, ErrChannelName) {
+			t.Fatalf("%q was refused for the wrong reason: %v", requested, err)
+		}
+	}
+}
+
 func TestChannelSubscribeRefusesAGrantFromAnotherTenant(t *testing.T) {
 	c := channelTestChannel(t, "acme", "private-orders.17")
 	conn, sink := channelTestConnection(t, "globex", "u1")

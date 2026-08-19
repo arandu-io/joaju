@@ -52,8 +52,12 @@
 // broadcasting.PrivateChannelPrefix and broadcasting.PresenceChannelPrefix,
 // broadcasting.TenantSeparator, broadcasting.RequestedChannel,
 // broadcasting.TenantChannel and the broadcasting.ChannelJoin action are all
-// used here as they stand. Only the three cache-channel prefixes are new,
-// because SSE has no cache channel.
+// used here as they stand. What is new is what SSE has no equivalent of: the
+// three cache-channel prefixes, because SSE has no cache channel, and
+// [MaxChannelNameLength] with [ChannelNameCharacters], because a name here is
+// held for the life of a subscription and a name there is not held at all.
+// Neither of those is a second opinion about what hesape already refuses --
+// they are read after it, over the name it accepted.
 //
 // # What this package deliberately leaves out
 //
