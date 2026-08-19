@@ -1,0 +1,78 @@
+name: fuzz
+
+# Nightly, and never on a pull request.
+#
+# The seed corpus and every crasher under testdata/fuzz already run as ordinary
+# subtests in `go test`, which is where a regression is caught -- for free, on
+# every push, deterministically. Running -fuzz on a pull request spends minutes
+# rediscovering that same corpus and can fail a change that has nothing to do
+# with what it found.
+#
+# What the long run buys is the paths a minute does not reach, and the cache
+# below is what makes the second night worth more than the first: without it
+# every run starts cold from the seeds and finds what the previous one already
+# found.
+on:
+  schedule:
+    # 03:17 UTC. Not on the hour: the scheduler queues those and a job asking
+    # for half an hour of a shared runner is the kind that waits.
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+
+      - name: cache the corpus
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/go-build/fuzz
+          # The key moves every run and restore-keys falls back to the newest
+          # one that exists, so each night starts from what the last one
+          # learned. A fixed key would freeze the corpus at whatever the first
+          # run produced.
+          key: fuzz-${{ github.run_id }}
+          restore-keys: fuzz-
+
+      - name: fuzz every target
+        run: |
+          set -uo pipefail
+          # The targets are discovered rather than listed: a list in this file
+          # is a list that goes stale the first time somebody adds a target and
+          # does not think of CI.
+          failed=0
+          while read -r pkgdir target; do
+            echo "::group::$target ($pkgdir)"
+            if ! go test "./$pkgdir" -run='^$' -fuzz="^$target\$" -fuzztime=5m; then
+              failed=1
+              echo "::error::$target found a crasher"
+            fi
+            echo "::endgroup::"
+          done < <(
+            grep -rl 'func Fuzz' --include='*_test.go' . |
+              while read -r f; do
+                d=$(dirname "$f")
+                grep -ho 'func Fuzz[A-Za-z0-9_]*' "$f" | sed "s|func |${d#./} |"
+              done | sort -u
+          )
+          exit "$failed"
+
+      - name: keep what it found
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: crashers
+          # A crasher belongs in testdata/fuzz, committed by a person who read
+          # it. CI that commits its own corpus fills the repository with inputs
+          # nobody has looked at.
+          path: "**/testdata/fuzz/**"
+          if-no-files-found: ignore
