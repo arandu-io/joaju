@@ -249,9 +249,11 @@ func FuzzSubscribeRequest(f *testing.F) {
 			return
 		}
 
-		if len(member.UserID)+len(member.Info) > len(data) {
-			t.Fatalf("a member of %d bytes came out of %d bytes of input",
-				len(member.UserID)+len(member.Info), len(data))
+		// Guarded on the input being UTF-8 for the reason the size above it is,
+		// and it is the same widening seen one field further in: a user_id of
+		// bytes no decoder can read comes back three bytes out for one in.
+		if size := len(member.UserID) + len(member.Info); utf8.Valid(data) && size > len(data) {
+			t.Fatalf("a member of %d bytes came out of %d bytes of input", size, len(data))
 		}
 		if len(member.Info) > 0 && !json.Valid(member.Info) {
 			t.Fatalf("an accepted member carries user_info that is not JSON: %q", member.Info)
