@@ -112,6 +112,9 @@ var (
 	ErrInvalidMessage = ProtocolError{Code: CodeInvalidMessage, Message: "Invalid message format"}
 	// ErrRateLimited is 4301: the client is sending faster than it may.
 	ErrRateLimited = ProtocolError{Code: CodeRateLimited, Message: "Rate limit exceeded"}
+	// ErrChannelLimit is 4301: the socket is already on as many channels as
+	// [PusherConfig.MaxChannelsPerConnection] allows.
+	ErrChannelLimit = ProtocolError{Code: CodeRateLimited, Message: "Subscription rejected - this connection is on as many channels as it may be"}
 	// ErrClientEventsDisabled is 4301: this server does not relay client
 	// events, which is the default. See [ClientEvents].
 	ErrClientEventsDisabled = ProtocolError{Code: CodeRateLimited, Message: "The app does not have client messaging enabled."}

@@ -557,6 +557,79 @@ func TestPusherRefusesAChannelNameOutsideWhatTheProtocolCarries(t *testing.T) {
 	protocolSubscribe(t, conn, "private-"+strings.Repeat("z", joaju.MaxChannelNameLength-len("private-")))
 }
 
+// The ceiling on how many channels one socket may be on, which is what stands
+// between one authorized client and a record that only grows.
+func TestPusherRefusesASubscriptionPastTheSocketsChannelLimit(t *testing.T) {
+	f := newProtocolFixture(t, joaju.PusherConfig{MaxChannelsPerConnection: 3})
+	conn, _ := f.open(t)
+
+	for i := range 3 {
+		protocolSubscribe(t, conn, "orders."+strconv.Itoa(i))
+	}
+
+	protocolSend(t, conn, `{"event":"pusher:subscribe","data":{"channel":"orders.3"}}`)
+	if code, _ := protocolRefusal(t, conn); code != joaju.CodeRateLimited {
+		t.Fatalf("a fourth subscription on a socket that may be on three answered %d, want %d", code, joaju.CodeRateLimited)
+	}
+	// Nothing was asked about it. The limit is this process's, so a
+	// subscription that cannot happen is one no policy is made to weigh.
+	if asked := f.policy.seen(); len(asked) != 3 {
+		t.Fatalf("the policy was asked %d times, want 3: a refused subscription reached it", len(asked))
+	}
+
+	// The socket keeps what it had, and is still a socket.
+	protocolSubscribe(t, conn, "orders.0")
+
+	// A channel it is already on is not a channel more, so a client
+	// resubscribing after a reconnect is not refused by its own seats.
+	protocolSubscribe(t, conn, "orders.1")
+
+	// And leaving one makes room for one.
+	protocolSend(t, conn, `{"event":"pusher:unsubscribe","data":{"channel":"orders.1"}}`)
+	protocolBarrier(t, conn)
+	protocolSubscribe(t, conn, "orders.3")
+}
+
+// The limit is one socket's, so a customer's other tabs are untouched by the tab
+// that reached it.
+func TestPusherCountsChannelsPerSocketAndNotPerTenant(t *testing.T) {
+	f := newProtocolFixture(t, joaju.PusherConfig{MaxChannelsPerConnection: 2})
+	full, _ := f.open(t)
+	other, _ := f.open(t)
+
+	protocolSubscribe(t, full, "orders.0")
+	protocolSubscribe(t, full, "orders.1")
+	protocolSend(t, full, `{"event":"pusher:subscribe","data":{"channel":"orders.2"}}`)
+	if code, _ := protocolRefusal(t, full); code != joaju.CodeRateLimited {
+		t.Fatalf("the third subscription answered %d, want %d", code, joaju.CodeRateLimited)
+	}
+
+	// The same names, from the same tenant, on another socket.
+	protocolSubscribe(t, other, "orders.0")
+	protocolSubscribe(t, other, "orders.2")
+}
+
+// The number a deployment gets without asking, and the way to say it wants none.
+func TestPusherHoldsASocketToTheDefaultChannelLimitUnlessToldOtherwise(t *testing.T) {
+	f := newProtocolFixture(t, joaju.PusherConfig{})
+	conn, _ := f.open(t)
+
+	for i := range joaju.DefaultMaxChannelsPerConnection {
+		protocolSubscribe(t, conn, "orders."+strconv.Itoa(i))
+	}
+	protocolSend(t, conn, `{"event":"pusher:subscribe","data":{"channel":"orders.`+strconv.Itoa(joaju.DefaultMaxChannelsPerConnection)+`"}}`)
+	if code, _ := protocolRefusal(t, conn); code != joaju.CodeRateLimited {
+		t.Fatalf("subscription %d on a socket built with no limit configured answered %d, want %d: zero means the default and not no limit at all",
+			joaju.DefaultMaxChannelsPerConnection+1, code, joaju.CodeRateLimited)
+	}
+
+	unlimited := newProtocolFixture(t, joaju.PusherConfig{MaxChannelsPerConnection: -1})
+	free, _ := unlimited.open(t)
+	for i := range joaju.DefaultMaxChannelsPerConnection + 1 {
+		protocolSubscribe(t, free, "orders."+strconv.Itoa(i))
+	}
+}
+
 func TestPusherAnswersAPingAndSaysNothingToAPong(t *testing.T) {
 	f := newProtocolFixture(t, joaju.PusherConfig{})
 	conn, _ := f.open(t)

@@ -50,6 +50,22 @@ import (
 // nothing else -- the sentence the policy wrote names the subject and the
 // channel, and it goes to the caller's log through the error this returns.
 
+// DefaultMaxChannelsPerConnection is how many channels one socket may be on
+// when [PusherConfig.MaxChannelsPerConnection] does not say.
+//
+// It is a hundred because a page subscribes to what it renders -- a channel for
+// the user, one for the room it is in, one per widget on the screen -- and a
+// hundred is well past a screenful and well short of a client working through
+// names. A socket that wants more says so in a configuration file, where
+// somebody has to write the number down.
+//
+// The bound it puts on a process is the one worth reading before raising it:
+// this many times [ServerConfig.MaxConnections] is a tenant's worst case in
+// subscriptions, and a subscription to a name at [MaxChannelNameLength] was
+// measured at some 1.4 KiB of heap -- so a socket costs at most some 140 KiB of
+// channel here, and a tenant at both defaults at most some 1.4 GiB.
+const DefaultMaxChannelsPerConnection = 100
+
 // PusherConfig is the rest of what [NewPusher] takes: the settings whose zero
 // value is a decision rather than an omission.
 //
@@ -76,6 +92,31 @@ type PusherConfig struct {
 	// the channel. It is off in its zero value, which is the protocol's
 	// default; [ClientEvents] is where the reason is written down.
 	ClientEvents ClientEvents
+
+	// MaxChannelsPerConnection is how many channels ONE SOCKET may be on. Zero
+	// means [DefaultMaxChannelsPerConnection]; a negative number means no
+	// limit, and saying so takes writing -1 rather than leaving a field out.
+	//
+	// Per socket for the reason [ServerConfig.MaxMessagesPerSecond] is: a
+	// socket is the smallest thing a runaway client owns, and an allowance
+	// shared across a tenant would let one browser tab refuse the
+	// subscriptions of every other tab that customer has open.
+	//
+	// Unlike that one, zero here is the default and not "no limit". A rate has
+	// no number that is right for traffic this server has not seen; a channel
+	// count does, because what a client subscribes to is what it draws. And
+	// what is on the other side of leaving it out is not a slow client but a
+	// map with nothing above it: every subscription is a seat this type holds
+	// and a channel a [Broker] holds, both for as long as the socket lives, and
+	// one authorized client naming channels in a loop is enough.
+	//
+	// A subscription past the limit is answered with [ErrChannelLimit] and
+	// dropped, and the socket keeps the channels it has. It is not closed, for
+	// the reason MaxMessagesPerSecond gives: the client a limit is aimed at is
+	// the one worth keeping addressable, and a client that is hung up on
+	// reconnects and starts again -- which costs the same channels plus a
+	// handshake.
+	MaxChannelsPerConnection int
 
 	// Observer is told when a channel came into existence and when it went. Nil
 	// means [NopObserver].
@@ -127,12 +168,16 @@ func NewPusher(broker Broker, subscribe SubscriptionPolicy, cfg PusherConfig) Pr
 	}
 
 	p := &pusher{
-		broker:    broker,
-		subscribe: subscribe,
-		events:    cfg.ClientEvents,
-		timeout:   cfg.ActivityTimeout,
-		observer:  cfg.Observer,
-		seats:     make(map[SocketID]map[string]seat),
+		broker:      broker,
+		subscribe:   subscribe,
+		events:      cfg.ClientEvents,
+		timeout:     cfg.ActivityTimeout,
+		maxChannels: cfg.MaxChannelsPerConnection,
+		observer:    cfg.Observer,
+		seats:       make(map[SocketID]map[string]seat),
+	}
+	if p.maxChannels == 0 {
+		p.maxChannels = DefaultMaxChannelsPerConnection
 	}
 	if p.observer == nil {
 		// Never nil, for the reason [NopObserver] gives: the branch would be free
@@ -185,6 +230,10 @@ type pusher struct {
 	subscribe SubscriptionPolicy
 	events    ClientEvents
 	timeout   time.Duration
+	// maxChannels is never zero: [NewPusher] fills in
+	// [DefaultMaxChannelsPerConnection], and a negative number is a deployment
+	// asking for no limit at all.
+	maxChannels int
 	// observer is never nil. See [NopObserver].
 	observer Observer
 
@@ -309,6 +358,14 @@ func (p *pusher) join(ctx context.Context, conn *Connection, f Frame) error {
 	name, err := NewChannelName(conn.Grant(), request.Channel)
 	if err != nil {
 		return err
+	}
+	// Before the policy, and not after: what the limit protects is this
+	// process, so a subscription that cannot happen is one nothing else should
+	// be made to do work for -- a [SubscriptionPolicy] is where a database
+	// query lives, and a client at its ceiling asking again in a loop would run
+	// one per frame.
+	if p.atChannelLimit(conn.ID(), name) {
+		return ErrChannelLimit
 	}
 	// Nothing between the frame and here reads [SubscribeRequest.Auth] or
 	// interprets the channel_data it was computed over. Both are handed on as
@@ -564,6 +621,35 @@ func (p *pusher) drop(ctx context.Context, s seat) (bool, error) {
 	_, err := p.broker.Find(ctx, s.grant, s.name)
 
 	return errors.Is(err, ErrNoChannel), nil
+}
+
+// atChannelLimit reports whether seating this socket on this name would put it
+// on one channel more than it may be on.
+//
+// A name the socket is already on answers no, because [pusher.take] replaces
+// that seat rather than adding one: a client resubscribing after a reconnect is
+// not asking for a channel it does not have, and refusing it would take away
+// one it does.
+//
+// It reserves nothing, and does not need to. [Protocol] says the frames of one
+// socket are read by one goroutine in order, so between this answer and the
+// take it precedes there is no other frame of this socket to seat one. Another
+// socket's subscription cannot move this count either -- the map is keyed by
+// [SocketID].
+func (p *pusher) atChannelLimit(id SocketID, name ChannelName) bool {
+	if p.maxChannels < 0 {
+		return false
+	}
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	held := p.seats[id]
+	if _, seated := held[name.String()]; seated {
+		return false
+	}
+
+	return len(held) >= p.maxChannels
 }
 
 // take records that this socket is on this channel.
