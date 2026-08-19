@@ -192,6 +192,43 @@ func TestChannelRefusesAClientThatNamesAnotherTenant(t *testing.T) {
 	}
 }
 
+// The encrypted prefix, which the server has no key for and still has to read.
+//
+// The encryption is the subscribers' business, but the two properties the
+// prefix is wrapped around are this server's: a name it does not recognize is
+// authorized by accident -- "private-encrypted-" begins with "private-" -- and
+// replayed to nobody, because "private-encrypted-cache-" does not begin with
+// "private-cache-".
+func TestChannelNameTypeReadsTheEncryptedPrefix(t *testing.T) {
+	for _, one := range []struct {
+		requested string
+		want      ChannelType
+	}{
+		{broadcasting.EncryptedPrivateChannelPrefix + "orders.17", PrivateChannel},
+		{EncryptedPrivateCacheChannelPrefix + "quotes", PrivateCacheChannel},
+		// The prefixes it must not swallow.
+		{PrivateCacheChannelPrefix + "quotes", PrivateCacheChannel},
+		{PresenceCacheChannelPrefix + "room", PresenceCacheChannel},
+		{broadcasting.PrivateChannelPrefix + "orders.17", PrivateChannel},
+		{CacheChannelPrefix + "quotes", CacheChannel},
+	} {
+		name := channelTestName(t, "acme", one.requested)
+		if got := name.Type(); got != one.want {
+			t.Fatalf("%q is a %s channel, want %s", one.requested, got, one.want)
+		}
+	}
+
+	// The two the encrypted prefix would have lost, said as the properties the
+	// rest of the package reads rather than as the kind.
+	encrypted := channelTestName(t, "acme", EncryptedPrivateCacheChannelPrefix+"quotes")
+	if !encrypted.Type().Guarded() {
+		t.Fatalf("%q is unguarded, so a policy may allow it freely", encrypted.Requested())
+	}
+	if !encrypted.Type().Cache() {
+		t.Fatalf("%q does not replay, so a client that subscribes after the event waits for the next one", encrypted.Requested())
+	}
+}
+
 // The protocol's ceiling on a name, which is what stands between one authorized
 // socket and a channel the size of the message limit.
 func TestNewChannelNameRefusesANameLongerThanTheProtocolCarries(t *testing.T) {

@@ -40,6 +40,15 @@ const (
 	// PresenceCacheChannelPrefix marks a cache channel that publishes its
 	// members.
 	PresenceCacheChannelPrefix = broadcasting.PresenceChannelPrefix + CacheChannelPrefix
+	// EncryptedPrivateCacheChannelPrefix marks a cache channel that must be
+	// authorized and whose payloads the subscribers encrypt among themselves.
+	//
+	// The encryption is not this server's: what it replays is the bytes it was
+	// handed. The prefix is named because it is the one place where the
+	// protocol puts something between "private-" and "cache-", so it is the one
+	// place [ChannelName.Type] would read a cache channel as a plain private
+	// one and stop replaying to it.
+	EncryptedPrivateCacheChannelPrefix = broadcasting.EncryptedPrivateChannelPrefix + CacheChannelPrefix
 )
 
 // What a channel name may be, which [NewChannelName] enforces.
@@ -368,6 +377,14 @@ func (n ChannelName) IsZero() bool { return n.tenant == "" || n.requested == "" 
 // copies of this switch would be two copies of that ordering, and the second
 // one is where a private cache channel quietly becomes a plain private one.
 //
+// An encrypted channel is read for the two properties this server implements
+// and not for the encryption, which it has no part in:
+// [EncryptedPrivateCacheChannelPrefix] is a [PrivateCacheChannel] and the
+// plain "private-encrypted-" is a [PrivateChannel], reached through the
+// "private-" it begins with. There is no kind of its own, because what the
+// prefix promises the subscribers is a key they share and nothing this type
+// could report.
+//
 // It reads [ChannelName.Requested] and not [ChannelName.String], because the
 // prefix is at the front of the name the client sent and the published name has
 // the tenant in front of it. Asking the published name instead is a mistake
@@ -375,6 +392,8 @@ func (n ChannelName) IsZero() bool { return n.tenant == "" || n.requested == "" 
 // every private channel reports itself unguarded.
 func (n ChannelName) Type() ChannelType {
 	switch name := n.requested; {
+	case strings.HasPrefix(name, EncryptedPrivateCacheChannelPrefix):
+		return PrivateCacheChannel
 	case strings.HasPrefix(name, PrivateCacheChannelPrefix):
 		return PrivateCacheChannel
 	case strings.HasPrefix(name, PresenceCacheChannelPrefix):

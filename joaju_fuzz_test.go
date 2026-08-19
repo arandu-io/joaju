@@ -26,6 +26,7 @@ func FuzzNewChannelName(f *testing.F) {
 	f.Add("acme", "private-cache-quotes")
 	f.Add("acme", "presence-cache-room")
 	f.Add("acme", broadcasting.EncryptedPrivateChannelPrefix+"orders.17")
+	f.Add("acme", EncryptedPrivateCacheChannelPrefix+"quotes")
 	// The name that spells the separator, which is a client choosing whose
 	// events it hears, and the tenant that spells it, which is one namespace
 	// landing inside another.
@@ -91,7 +92,8 @@ func FuzzNewChannelName(f *testing.F) {
 
 		cache := strings.HasPrefix(requested, CacheChannelPrefix) ||
 			strings.HasPrefix(requested, PrivateCacheChannelPrefix) ||
-			strings.HasPrefix(requested, PresenceCacheChannelPrefix)
+			strings.HasPrefix(requested, PresenceCacheChannelPrefix) ||
+			strings.HasPrefix(requested, EncryptedPrivateCacheChannelPrefix)
 		if name.Type().Cache() != cache {
 			t.Fatalf("%q is %s, and the prefix says cache is %v", requested, name.Type(), cache)
 		}

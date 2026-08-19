@@ -755,6 +755,39 @@ func TestPusherReplaysACacheChannelAndSaysWhenThereIsNothingToReplay(t *testing.
 	protocolSilence(t, first)
 }
 
+// The same replay on the channel whose prefix has the encryption in the middle
+// of it, which is the one a server that reads only "private-cache-" leaves out.
+func TestPusherReplaysAnEncryptedPrivateCacheChannel(t *testing.T) {
+	f := newProtocolFixture(t, joaju.PusherConfig{})
+	const channel = joaju.EncryptedPrivateCacheChannelPrefix + "prices"
+
+	first, _ := f.open(t)
+	protocolSend(t, first, `{"event":"pusher:subscribe","data":{"channel":"`+channel+`"}}`)
+	if missed := protocolNext(t, first); missed.Event != joaju.EventCacheMiss || missed.Channel != channel {
+		t.Fatalf("the first subscriber was told %+v, want %s", missed, joaju.EventCacheMiss)
+	}
+	if confirmation := protocolNext(t, first); confirmation.Event != joaju.EventSubscriptionSucceeded {
+		t.Fatalf("after the miss came %s, want %s", confirmation.Event, joaju.EventSubscriptionSucceeded)
+	}
+
+	// A payload the subscribers encrypted among themselves, which this server
+	// holds and replays as the bytes it was handed.
+	if status, body := f.post(t, "/apps/"+serverAppID+"/events",
+		`{"name":"prices.updated","channel":"`+channel+`","data":"{\"ciphertext\":\"ZW5jcnlwdGVk\"}"}`); status != http.StatusOK {
+		t.Fatalf("publishing answered %d: %s", status, body)
+	}
+	if delivered := protocolNext(t, first); delivered.Event != "prices.updated" {
+		t.Fatalf("the subscriber received %+v, want the event that was published", delivered)
+	}
+
+	second, _ := f.open(t)
+	protocolSend(t, second, `{"event":"pusher:subscribe","data":{"channel":"`+channel+`"}}`)
+	replayed := protocolNext(t, second)
+	if replayed.Event != "prices.updated" || string(replayed.Data) != `{"ciphertext":"ZW5jcnlwdGVk"}` {
+		t.Fatalf("the second subscriber was given %+v, want the last event replayed: the prefix was read as a plain private channel", replayed)
+	}
+}
+
 func TestPusherRefusesAClientEventWhenTheyAreOff(t *testing.T) {
 	f := newProtocolFixture(t, joaju.PusherConfig{})
 	conn, _ := f.open(t)

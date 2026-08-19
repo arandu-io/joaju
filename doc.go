@@ -65,9 +65,18 @@
 // and running one per application is both simpler to operate and free of the
 // cross-application state the tenant rules exist to prevent.
 //
-// The protocol's private-encrypted- channels have no [ChannelType].
-// End-to-end encrypted channels are a key-distribution feature, not a channel
-// kind.
+// The protocol's private-encrypted- channels have no [ChannelType] of their
+// own. End-to-end encrypted channels are a key distribution feature, not a
+// channel kind: this server never holds the key and never reads a payload, so
+// there is nothing about one it could report that private does not already say.
+//
+// The prefix is still read, and [ChannelName.Type] is where. What it is read
+// for is the two properties this server does implement -- authorized, and
+// replayed to whoever subscribes next -- so "private-encrypted-" is a
+// [PrivateChannel] and "private-encrypted-cache-" is a [PrivateCacheChannel].
+// Leaving it unread cost nothing on the first and a replay on the second, which
+// is the shape of a prefix that is half known: the guarded half was right by
+// accident, because it is the half "private-" already carried.
 //
 // [Channel] has no second broadcast method for an event this server was relayed
 // rather than handed. Suppressing the re-cache of a replayed payload is the
