@@ -298,7 +298,7 @@ func (f *serverFixture) socketURL(key string) string {
 	return "ws" + strings.TrimPrefix(f.http.URL, "http") + "/app/" + key
 }
 
-// host is what a same-origin request claims, and what the fork compares the
+// host is what a same-origin request claims, and what the upgrade compares the
 // Origin header against.
 func (f *serverFixture) host(t *testing.T) string {
 	t.Helper()

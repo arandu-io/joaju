@@ -369,17 +369,17 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		return nil, fmt.Errorf("joaju: PongTimeout (%s) has to be longer than PingInterval (%s), or the read deadline expires before the pong the ping asked for can arrive", s.pongTimeout, s.pingInterval)
 	}
 
-	// Upgrader.CheckOrigin is deliberately left nil, which is the fork's
-	// same-origin default: an Origin header naming another host is refused with
-	// 403 before the socket exists. A WebSocket that accepts any origin is CSRF
-	// over a socket -- the browser attaches the cookies either way, and there is
-	// no preflight to stop it.
+	// Nothing here configures origins, because the Upgrader has no field for
+	// it: Upgrade runs the same-origin check itself, and an Origin header
+	// naming another host is refused with 403 before the socket exists. A
+	// WebSocket that accepts any origin is CSRF over a socket -- the browser
+	// attaches the cookies either way, and there is no preflight to stop it.
 	//
 	// There is no configuration field that widens it, and that is the decision.
 	// A [ConnectPolicy] sees the Origin verbatim on the [Handshake] and may
-	// refuse it; it cannot allow one this check refuses, so the two can only
+	// refuse it; it cannot allow one that check refuses, so the two can only
 	// narrow, never disagree. Cross-origin sockets are not available in the
-	// first version, and when they are it will be this one function that
+	// first version, and when they are it will be the check inside Upgrade that
 	// changes, not a list in a config file.
 	s.upgrader = ws.Upgrader{
 		ReadBufferSize:  1024,
@@ -533,7 +533,7 @@ func (s *Server) handleSocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// The fork's same-origin check runs inside Upgrade and writes its own 403.
+	// The same-origin check runs inside Upgrade, which writes its own 403.
 	socket, err := s.upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		s.log.InfoContext(r.Context(), "joaju: the upgrade was refused", slog.Any("error", err))
@@ -637,9 +637,9 @@ func (s *Server) read(r *http.Request, conn *Connection, socket *ws.Conn) {
 
 		// Counted here, where a frame the client sent has arrived and nothing
 		// has acted on it yet. The WebSocket ping and pong never reach this
-		// point -- the fork answers them inside ReadMessage -- and they should
-		// not: they are the transport keeping itself alive, not the client
-		// asking for anything.
+		// point -- ReadMessage answers a ping and hands a pong to the handler,
+		// and returns neither -- and they should not: they are the transport
+		// keeping itself alive, not the client asking for anything.
 		if !limiter.allow(time.Now()) {
 			s.log.InfoContext(ctx, "joaju: a frame was dropped by the socket's rate limit",
 				slog.String("socket", string(conn.ID())),
