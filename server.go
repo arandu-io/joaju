@@ -369,18 +369,18 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		return nil, fmt.Errorf("joaju: PongTimeout (%s) has to be longer than PingInterval (%s), or the read deadline expires before the pong the ping asked for can arrive", s.pongTimeout, s.pingInterval)
 	}
 
-	// Nothing here configures origins, because the Upgrader has no field for
-	// it: Upgrade runs the same-origin check itself, and an Origin header
-	// naming another host is refused with 403 before the socket exists. A
-	// WebSocket that accepts any origin is CSRF over a socket -- the browser
-	// attaches the cookies either way, and there is no preflight to stop it.
+	// CheckOrigin is left nil, and that is the decision. Nil is the transport's
+	// same-origin check: an Origin header naming another host is refused with
+	// 403 before the socket exists. A WebSocket that accepts any origin is CSRF
+	// over a socket -- the browser attaches the cookies either way, and there is
+	// no preflight to stop it.
 	//
-	// There is no configuration field that widens it, and that is the decision.
-	// A [ConnectPolicy] sees the Origin verbatim on the [Handshake] and may
-	// refuse it; it cannot allow one that check refuses, so the two can only
-	// narrow, never disagree. Cross-origin sockets are not available in the
-	// first version, and when they are it will be the check inside Upgrade that
-	// changes, not a list in a config file.
+	// Nothing this server exposes sets that field, so there is no configuration
+	// that widens it. A [ConnectPolicy] sees the Origin verbatim on the
+	// [Handshake] and may refuse it; it cannot allow one the check refuses, so
+	// the two can only narrow, never disagree. Cross-origin sockets are not
+	// available in the first version, and when they are it will be this
+	// assignment that changes, not a list in a config file.
 	s.upgrader = ws.Upgrader{
 		ReadBufferSize:  1024,
 		WriteBufferSize: 1024,
