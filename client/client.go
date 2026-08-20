@@ -9,10 +9,10 @@
 // is no package.json, no lockfile, no bundler and no build step: the file that
 // is embedded is the file a browser runs.
 //
-// # Why this is a handler and not a tenth route on the Server
+// # Why this is a handler and not another route on the Server
 //
-// [github.com/arandu-io/joaju.Server] answers nine routes and this is not the
-// tenth. The reason is the CSP rather than the route table: the pages this
+// A joaju deployment answers nine routes and this is not the tenth. The reason
+// is the CSP rather than the route table: the pages this
 // client runs on are served under script-src 'self', so the script has to come
 // from the ORIGIN THE PAGE IS ON.
 // A joaju server is frequently not that origin -- cmd/joaju is a process of its

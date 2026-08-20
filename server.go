@@ -4,17 +4,14 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/binary"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
-	"strings"
 	"sync"
 	"time"
 
 	"github.com/arandu-io/hesape/auth"
-	"github.com/arandu-io/hesape/broadcasting"
 	"github.com/arandu-io/joaju/ws"
 )
 
@@ -328,7 +325,13 @@ type ServerConfig struct {
 	PongTimeout   time.Duration
 }
 
-// Server answers the nine routes: the socket and the eight of the HTTP API.
+// Server answers one route -- the socket -- and mounts whatever the [Protocol]
+// answers over HTTP beside it.
+//
+// One and not nine, because the other eight are a wire format's and this owns
+// no wire format. What it owns is the socket: the upgrade, the two goroutines,
+// the deadlines, the registry and the limits. See [Protocol] for the other side
+// of that line and [API] for what a route is given to cross it.
 //
 // It is an http.Handler and not a net/http.Server, so that it is mounted the
 // way any other handler is -- behind hesape/auth's Authenticate middleware,
@@ -337,32 +340,14 @@ type ServerConfig struct {
 // and this server does not authenticate anybody: it reads the subject the
 // middleware put there and asks a Policy about it.
 //
-// So the API routes verify no app_secret HMAC of their own. A standalone socket
-// server has to, having no session to read; here the request has already been
-// through the host application's front door, and a second credential would be a
-// second way to prove who is calling.
+// # The authorization shape, which the socket route follows
 //
-// # The authorization shape, which every route follows
+//	[ConnectPolicy]  once, before the upgrade  may this subject be here at all
 //
-//	[ConnectPolicy]       once per request  may this subject be here at all
-//	[SubscriptionPolicy]  once per channel  may this subject reach this channel
-//
-// Both run on the API routes and not only on the socket, because listing
-// channels, counting subscribers and reading a presence channel's members are
-// reads of who is talking to whom, and there is no exception for reads. A
-// dashboard that lists channels without a policy is a tenant boundary that
-// holds everywhere except the dashboard.
-//
-// A [Handshake] is what the [ConnectPolicy] is asked about on an API route as
-// well, with Socket empty -- an API caller is asking the same question a
-// browser asks, minus the socket it wants opened. Inventing a third auth.Action
-// for it would mean a third policy an application has to remember to write, and
-// the question it would answer is the one [Connect] already answers.
-//
-// The Connect Grant is also what a [ChannelName] on an API route is built from,
-// because a name needs a tenant and a tenant comes off a Grant.
-// The channel a caller named in the path is never trusted for that: it supplies
-// the name after the tenant, and nothing else.
+// It runs before the upgrade, so a refusal is an HTTP status a browser reports
+// rather than a socket that opens and shuts. What a subject may then reach is
+// the [SubscriptionPolicy]'s answer, asked once per channel by whoever reaches
+// one -- the [Protocol] on a frame, and its routes on a request.
 type Server struct {
 	appID  string
 	appKey string
@@ -373,9 +358,8 @@ type Server struct {
 	protocol  Protocol
 	log       *slog.Logger
 	// relay is the other instances, or nil for a deployment of one. It is what
-	// the four metrics routes ask and what [Server.carry] hands an event to; the
-	// other direction arrives through [relayedBroker], which is what broker is
-	// whenever this is not nil.
+	// [Server.Fleet] asks; the other direction arrives through [relayedBroker],
+	// which is what broker is whenever this is not nil.
 	relay *Relay
 
 	upgrader ws.Upgrader
@@ -506,20 +490,15 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		WriteBufferSize: 1024,
 	}
 
+	// One route is this server's, and it is the socket. Everything else a
+	// deployment answers is the protocol's and is mounted under the pattern
+	// that matches whatever the socket route did not.
+	//
+	// The socket route is registered first and is the more specific of the two,
+	// so it is reached whatever a protocol mounts: an upgrade is the
+	// transport's, and no wire format may take it over.
 	s.mux = http.NewServeMux()
 	s.mux.HandleFunc("GET /app/{appKey}", s.handleSocket)
-	s.mux.HandleFunc("POST /apps/{appId}/events", s.handleEvents)
-	s.mux.HandleFunc("POST /apps/{appId}/batch_events", s.handleBatchEvents)
-	s.mux.HandleFunc("GET /apps/{appId}/connections", s.handleConnections)
-	s.mux.HandleFunc("GET /apps/{appId}/channels", s.handleChannels)
-	s.mux.HandleFunc("GET /apps/{appId}/channels/{channel}", s.handleChannel)
-	s.mux.HandleFunc("GET /apps/{appId}/channels/{channel}/users", s.handleChannelUsers)
-	s.mux.HandleFunc("POST /apps/{appId}/users/{userId}/terminate_connections", s.handleTerminate)
-
-	// The protocol's own, under the pattern that matches whatever the socket
-	// route did not. The socket route is registered first and is the more
-	// specific of the two, so it is reached whatever a protocol mounts -- an
-	// upgrade is the transport's, and no wire format may take it over.
 	if routes := cfg.Protocol.Routes(s.api()); routes != nil {
 		s.mux.Handle("/", routes)
 	}
@@ -672,7 +651,12 @@ func (s *Server) handleSocket(w http.ResponseWriter, r *http.Request) {
 		Origin: r.Header.Get("Origin"),
 	})
 	if err != nil {
-		s.fail(w, r, err)
+		status, message := http.StatusBadRequest, "The handshake could not be served."
+		if errors.Is(err, auth.ErrForbidden) {
+			status, message = http.StatusForbidden, "Forbidden."
+		}
+		s.refuse(w, r, status, message, err)
+
 		return
 	}
 
@@ -697,6 +681,29 @@ func (s *Server) handleSocket(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.read(r, conn, socket)
+}
+
+// refuse answers a socket route request that will not become a socket, and
+// records why.
+//
+// Plain text and a status, which is what a refused upgrade already answers
+// with: ws.Upgrader.Upgrade writes its own 403 that way when the Origin names
+// another host, and answering the four decisions above it in some other shape
+// would mean a client having to read two. What a [Protocol] answers its own
+// routes with is its own, and this is not it.
+//
+// The refusal says only that it was refused. The sentence a Policy wrote names
+// the subject and often the resource, and it goes to the log rather than to
+// whoever was refused.
+func (s *Server) refuse(w http.ResponseWriter, r *http.Request, status int, message string, err error) {
+	if err != nil {
+		s.log.InfoContext(r.Context(), "joaju: a socket was refused",
+			slog.String("route", r.Method+" "+r.URL.Path),
+			slog.Int("status", status),
+			slog.Any("error", err))
+	}
+
+	http.Error(w, message, status)
 }
 
 // read runs the connection: it registers it, hands it to the [Protocol], and
@@ -854,437 +861,6 @@ func (s *Server) unregister(conn *Connection) {
 		return
 	}
 	s.perTenant[tenant]--
-}
-
-// publishRequest is the body of POST /apps/{appId}/events, and one element of
-// the batch of POST /apps/{appId}/batch_events.
-//
-// Data is a string and not a json.RawMessage because the Pusher protocol says
-// so: the payload travels as a JSON string containing JSON, in both directions.
-// [Event.Data] holds it decoded, which is the one place the double encoding is
-// undone.
-type publishRequest struct {
-	Name     string   `json:"name"`
-	Data     string   `json:"data"`
-	Channel  string   `json:"channel"`
-	Channels []string `json:"channels"`
-	SocketID string   `json:"socket_id"`
-}
-
-// handleEvents is POST /apps/{appId}/events: publish one event.
-func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
-	grant, ok := s.enter(w, r)
-	if !ok {
-		return
-	}
-
-	var body publishRequest
-	if !s.decode(w, r, &body) {
-		return
-	}
-	if err := s.publish(r.Context(), grant, body); err != nil {
-		s.fail(w, r, err)
-		return
-	}
-
-	writeJSON(w, http.StatusOK, struct{}{})
-}
-
-// handleBatchEvents is POST /apps/{appId}/batch_events: publish many.
-func (s *Server) handleBatchEvents(w http.ResponseWriter, r *http.Request) {
-	grant, ok := s.enter(w, r)
-	if !ok {
-		return
-	}
-
-	var body struct {
-		Batch []publishRequest `json:"batch"`
-	}
-	if !s.decode(w, r, &body) {
-		return
-	}
-	// Each element is authorized on its own. A batch is a convenience for the
-	// caller and never a way to reach a channel one of its elements could not
-	// have reached alone.
-	for _, one := range body.Batch {
-		if err := s.publish(r.Context(), grant, one); err != nil {
-			s.fail(w, r, err)
-			return
-		}
-	}
-
-	writeJSON(w, http.StatusOK, struct{}{})
-}
-
-// publish delivers one event to every channel it names, on this instance and on
-// the others.
-//
-// A channel nobody is subscribed to HERE is not an error, and it is not the end
-// of the event either: this instance holds no channel under that name, and the
-// instance holding the sockets that are on it is usually not the one that took
-// the request. So the local delivery is skipped and [Server.carry] runs anyway.
-// On a deployment of one that is the same "delivered to no one" it always was.
-func (s *Server) publish(ctx context.Context, connected auth.Grant, body publishRequest) error {
-	if body.Name == "" {
-		return errors.New("joaju: an event needs a name")
-	}
-	// The two reserved namespaces are the server's own voice. A client that
-	// could publish pusher_internal:member_added could invent members, and one
-	// that could publish pusher:error could tell another client its
-	// subscription was refused.
-	if strings.HasPrefix(body.Name, ProtocolPrefix) || strings.HasPrefix(body.Name, InternalPrefix) {
-		return fmt.Errorf("joaju: %q is a reserved event name, and only the server may send one", body.Name)
-	}
-	// The payload is a JSON string containing JSON, and this is where the outer
-	// string is undone. It is checked here rather than trusted, because
-	// [Event.Data] is a json.RawMessage from here on and an invalid one fails
-	// at the far end of a fanout, on somebody else's socket.
-	if !json.Valid([]byte(body.Data)) {
-		return errors.New("joaju: the data of an event has to be JSON")
-	}
-
-	requested := body.Channels
-	if body.Channel != "" {
-		requested = append([]string{body.Channel}, requested...)
-	}
-	if len(requested) == 0 {
-		return errors.New("joaju: an event needs a channel")
-	}
-
-	for _, one := range requested {
-		name, err := NewChannelName(connected, one)
-		if err != nil {
-			return err
-		}
-		grant, err := s.reach(ctx, connected.Subject(), name, "")
-		if err != nil {
-			return err
-		}
-
-		event := Event{
-			Name:    body.Name,
-			Channel: name,
-			Data:    json.RawMessage(body.Data),
-			Socket:  SocketID(body.SocketID),
-		}
-
-		channel, err := s.broker.Find(ctx, grant, name)
-		switch {
-		case errors.Is(err, ErrNoChannel):
-			// Nobody here is on it. The fleet still hears about it, below.
-		case err != nil:
-			return err
-		default:
-			// Broadcast and not BroadcastToAll: an empty [Event.Socket] already
-			// means everybody, so the sender is excluded when there is one and
-			// nobody is when there is not, through one call.
-			if err := channel.Broadcast(ctx, event); err != nil {
-				return err
-			}
-		}
-
-		// The other instances, after the local delivery and never instead of
-		// it. This does not fail the request -- see [Server.carry].
-		s.carry(ctx, event)
-	}
-
-	return nil
-}
-
-// handleConnections is GET /apps/{appId}/connections: how many sockets.
-func (s *Server) handleConnections(w http.ResponseWriter, r *http.Request) {
-	grant, ok := s.enter(w, r)
-	if !ok {
-		return
-	}
-
-	open, err := s.Connections(grant)
-	if err != nil {
-		s.fail(w, r, err)
-		return
-	}
-
-	// Added and not reconciled: a socket is held by exactly one instance, so
-	// the fleet's count and this one's have nothing in common to double-count.
-	open += s.Fleet(r.Context(), grant, "").Connections
-
-	writeJSON(w, http.StatusOK, map[string]any{"connections": open})
-}
-
-// handleChannels is GET /apps/{appId}/channels: the channel list.
-func (s *Server) handleChannels(w http.ResponseWriter, r *http.Request) {
-	connected, ok := s.enter(w, r)
-	if !ok {
-		return
-	}
-
-	// The collection question, asked of the same policy that answers about one
-	// channel: auth.Policy is asked about the zero resource for a collection
-	// action, and a Grant issued for anything but broadcasting.ChannelJoin
-	// reaches no Broker method.
-	grant, err := auth.Authorize(r.Context(), s.subscribe, connected.Subject(), broadcasting.ChannelJoin, Subscription{})
-	if err != nil {
-		s.fail(w, r, err)
-		return
-	}
-
-	channels, err := s.broker.All(r.Context(), grant)
-	if err != nil {
-		s.fail(w, r, err)
-		return
-	}
-
-	elsewhere := s.Fleet(r.Context(), grant, "")
-
-	// The key is [ChannelName.Requested] and never [ChannelName.String]: the
-	// caller asked about its own channels and the tenant they are held under is
-	// not its to read back.
-	listed := make(map[string]any, len(channels)+len(elsewhere.Channels))
-	for _, channel := range channels {
-		requested := channel.Name().Requested()
-		fleet := elsewhere.Channel(requested)
-		entry := map[string]any{"occupied": len(channel.Connections())+fleet.Subscriptions > 0}
-		if channel.Name().Type().Presence() {
-			entry["user_count"] = countMembers(channel, fleet.Users)
-		}
-		listed[requested] = entry
-	}
-	// A channel every subscriber of which is on another instance is still a
-	// channel this tenant has, and leaving it out would make the list say a
-	// customer is talking on fewer channels than they are.
-	for requested, fleet := range elsewhere.Channels {
-		if _, held := listed[requested]; held {
-			continue
-		}
-
-		entry := map[string]any{"occupied": fleet.Subscriptions > 0}
-		if fleetPresence(grant, requested) {
-			entry["user_count"] = len(fleet.Users)
-		}
-		listed[requested] = entry
-	}
-
-	writeJSON(w, http.StatusOK, map[string]any{"channels": listed})
-}
-
-// handleChannel is GET /apps/{appId}/channels/{channel}: one channel.
-func (s *Server) handleChannel(w http.ResponseWriter, r *http.Request) {
-	channel, grant, ok := s.channel(w, r)
-	if !ok {
-		return
-	}
-
-	name := channel.Name()
-	fleet := s.Fleet(r.Context(), grant, name.Requested()).Channel(name.Requested())
-
-	// A subscription is one socket on one channel and one socket is on one
-	// instance, so these add. The member count below does not: see [fleetAnswer].
-	subscribers := len(channel.Connections()) + fleet.Subscriptions
-	body := map[string]any{
-		"occupied":           subscribers > 0,
-		"subscription_count": subscribers,
-	}
-	if name.Type().Presence() {
-		body["user_count"] = countMembers(channel, fleet.Users)
-	}
-
-	writeJSON(w, http.StatusOK, body)
-}
-
-// handleChannelUsers is GET /apps/{appId}/channels/{channel}/users: the members
-// of a presence channel.
-func (s *Server) handleChannelUsers(w http.ResponseWriter, r *http.Request) {
-	channel, grant, ok := s.channel(w, r)
-	if !ok {
-		return
-	}
-	if !channel.Name().Type().Presence() {
-		s.refuse(w, r, http.StatusBadRequest, "Only a presence channel has users.", nil)
-		return
-	}
-
-	requested := channel.Name().Requested()
-	fleet := s.Fleet(r.Context(), grant, requested).Channel(requested)
-
-	seen := make(map[string]bool)
-	users := make([]map[string]string, 0, len(channel.Connections())+len(fleet.Users))
-	for _, subscriber := range channel.Connections() {
-		// One member may hold several sockets on one channel -- two tabs -- and
-		// the member list names people, not sockets.
-		if id := subscriber.Member.UserID; id != "" && !seen[id] {
-			seen[id] = true
-			users = append(users, map[string]string{"id": id})
-		}
-	}
-	// The two tabs may also be on two instances, which is the same person and
-	// the same reason: this is a union and never a concatenation.
-	for _, id := range fleet.Members() {
-		if !seen[id] {
-			seen[id] = true
-			users = append(users, map[string]string{"id": id})
-		}
-	}
-
-	writeJSON(w, http.StatusOK, map[string]any{"users": users})
-}
-
-// handleTerminate is POST /apps/{appId}/users/{userId}/terminate_connections.
-func (s *Server) handleTerminate(w http.ResponseWriter, r *http.Request) {
-	grant, ok := s.enter(w, r)
-	if !ok {
-		return
-	}
-
-	// The tenant comes off the Grant, so a caller naming another customer's
-	// user id closes nothing: the loop matches on both, and the userId in the
-	// path only ever narrows what the Grant already scoped.
-	if _, err := s.Terminate(r.Context(), grant, r.PathValue("userId")); err != nil {
-		s.fail(w, r, err)
-		return
-	}
-
-	writeJSON(w, http.StatusOK, struct{}{})
-}
-
-// enter is the first half of every API route: the app has to be this one, the
-// request has to carry a subject, and the [ConnectPolicy] has to allow it.
-func (s *Server) enter(w http.ResponseWriter, r *http.Request) (auth.Grant, bool) {
-	if r.PathValue("appId") != s.appID {
-		s.refuse(w, r, http.StatusNotFound, "Unknown app.", nil)
-		return auth.Grant{}, false
-	}
-
-	subject, ok := auth.SubjectFrom(r.Context())
-	if !ok {
-		s.refuse(w, r, http.StatusUnauthorized, "Unauthenticated.", nil)
-		return auth.Grant{}, false
-	}
-
-	// Socket is empty: an API caller is asking whether it may act on this
-	// server, which is the question [Connect] answers, and it is not asking for
-	// a socket to be opened. Origin is carried through because a browser
-	// calling the API sends one and the policy that judges it is the same one.
-	grant, err := auth.Authorize(r.Context(), s.connect, subject, Connect, Handshake{
-		Origin: r.Header.Get("Origin"),
-	})
-	if err != nil {
-		s.fail(w, r, err)
-		return auth.Grant{}, false
-	}
-
-	return grant, true
-}
-
-// channel is the second half of the three routes that name one: [Server.enter],
-// then the name built out of the Grant, then the [SubscriptionPolicy], then the
-// Broker.
-//
-// The Grant comes back with the channel because the two metrics routes have a
-// second half of their own -- [Server.fleet], which reads the tenant off it and
-// off nothing that arrived with the request.
-func (s *Server) channel(w http.ResponseWriter, r *http.Request) (Channel, auth.Grant, bool) {
-	connected, ok := s.enter(w, r)
-	if !ok {
-		return nil, auth.Grant{}, false
-	}
-
-	name, err := NewChannelName(connected, r.PathValue("channel"))
-	if err != nil {
-		s.fail(w, r, err)
-		return nil, auth.Grant{}, false
-	}
-	grant, err := s.reach(r.Context(), connected.Subject(), name, "")
-	if err != nil {
-		s.fail(w, r, err)
-		return nil, auth.Grant{}, false
-	}
-
-	channel, err := s.broker.Find(r.Context(), grant, name)
-	if err != nil {
-		s.fail(w, r, err)
-		return nil, auth.Grant{}, false
-	}
-
-	return channel, grant, true
-}
-
-// reach runs the [SubscriptionPolicy] for one channel and answers the Grant it
-// issued, which is the only thing a [Broker] accepts.
-func (s *Server) reach(ctx context.Context, subject auth.Subject, name ChannelName, socket SocketID) (auth.Grant, error) {
-	return auth.Authorize(ctx, s.subscribe, subject, broadcasting.ChannelJoin, Subscription{
-		Channel: name,
-		Socket:  socket,
-	})
-}
-
-// decode reads a JSON body of at most MaxBodySize.
-func (s *Server) decode(w http.ResponseWriter, r *http.Request, into any) bool {
-	r.Body = http.MaxBytesReader(w, r.Body, s.maxBodySize)
-	// Unknown fields are ignored rather than refused: the Pusher HTTP API has
-	// fields this server does not read -- "info" is one -- and a client SDK
-	// that sends one is not making a mistake.
-	if err := json.NewDecoder(r.Body).Decode(into); err != nil {
-		s.refuse(w, r, http.StatusBadRequest, "The body is not the JSON this route reads.", err)
-		return false
-	}
-
-	return true
-}
-
-// fail answers an error from a policy, a name or a broker.
-//
-// A refusal says only that it was refused. The sentence a Policy wrote names
-// the subject and often the resource, and it goes to the log rather than to
-// whoever was refused.
-func (s *Server) fail(w http.ResponseWriter, r *http.Request, err error) {
-	switch {
-	case errors.Is(err, auth.ErrForbidden):
-		s.refuse(w, r, http.StatusForbidden, "Forbidden.", err)
-	case errors.Is(err, ErrNoChannel):
-		s.refuse(w, r, http.StatusNotFound, "Unknown channel.", err)
-	default:
-		s.refuse(w, r, http.StatusBadRequest, "The request could not be served.", err)
-	}
-}
-
-// refuse writes the answer and records the reason.
-func (s *Server) refuse(w http.ResponseWriter, r *http.Request, status int, message string, err error) {
-	if err != nil {
-		s.log.InfoContext(r.Context(), "joaju: a request was refused",
-			slog.String("route", r.Method+" "+r.URL.Path),
-			slog.Int("status", status),
-			slog.Any("error", err))
-	}
-
-	writeJSON(w, status, map[string]string{"message": message})
-}
-
-// writeJSON writes one JSON body.
-func writeJSON(w http.ResponseWriter, status int, body any) {
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(body)
-}
-
-// countMembers is how many distinct people a presence channel holds, which is
-// not how many sockets it holds: two tabs are one member.
-//
-// fleet is the same channel's members on the other instances, and it is a set
-// of ids rather than a count for exactly the reason this function exists: the
-// two tabs may be on two instances, and adding two counts would make one person
-// two people. It is empty on a deployment of one.
-func countMembers(channel Channel, fleet map[string]bool) int {
-	seen := make(map[string]bool, len(fleet))
-	for id := range fleet {
-		seen[id] = true
-	}
-	for _, subscriber := range channel.Connections() {
-		if id := subscriber.Member.UserID; id != "" {
-			seen[id] = true
-		}
-	}
-
-	return len(seen)
 }
 
 // newSocketID mints a socket id in the shape Pusher's clients print,

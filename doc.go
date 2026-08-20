@@ -85,10 +85,14 @@
 //
 // # The routes these types serve
 //
-// The nine routes of the Pusher HTTP API, which the HTTP layer of this
-// repository answers with the values declared here:
+// One, and it is the socket:
 //
 //	GET  /app/{appKey}                                       the socket itself
+//
+// A deployment answers eight more, and they are a wire format's rather than
+// this package's -- the ones below are the Pusher protocol's, brought by
+// [Protocol.Routes] and mounted beside the socket route:
+//
 //	POST /apps/{appId}/events                                publish one
 //	POST /apps/{appId}/batch_events                          publish many
 //	GET  /apps/{appId}/connections                           metrics
@@ -100,15 +104,17 @@
 //
 // Every one of the seven that reads or writes channel state needs a Grant, and
 // [Broker] is why: there is no method on it that reaches a channel without one.
+// [API] is the whole of what a route may reach, and there is nothing on it that
+// writes to the connection registry or reads one without a Grant.
 //
 // # The protocol
 //
 // Subpackage protocols/pusher is the wire format: the frames, the codecs, the
-// channels, the in-memory Broker and the [Protocol] that answers a socket. It
-// imports this package and this package does not import it, which is what keeps
-// the two apart -- the server here owns the socket and knows no frame, and a
-// second protocol would be a second subpackage rather than a branch in this
-// one.
+// channels, the in-memory Broker, the eight HTTP routes and the [Protocol] that
+// answers a socket. It imports this package and this package does not import
+// it, which is what keeps the two apart -- the server here owns the socket and
+// knows no frame, and a second protocol would be a second subpackage rather
+// than a branch in this one.
 //
 // # The transport
 //

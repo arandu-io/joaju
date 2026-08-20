@@ -527,14 +527,15 @@ func (p *pusher) whisper(ctx context.Context, conn *joaju.Connection, f Frame) e
 	}
 
 	// The other instances, after the local delivery and never instead of it.
-	// This cannot refuse the frame -- see [pusher.carry].
-	p.carry(ctx, event)
+	// This cannot refuse the frame -- see [carry].
+	carry(ctx, p.broker, event)
 
 	return nil
 }
 
-// carry hands a client event to the other instances, and is the outbound half of
-// [pusher.whisper].
+// carry hands an event to the other instances, and is the outbound half of both
+// ways an event enters this protocol: a client event off a socket, and a publish
+// through the events route.
 //
 // The relay is reached through the [joaju.Broker] because that is the value the
 // protocol and the [joaju.Server] are made to share: [joaju.NewServer] refuses a
@@ -546,16 +547,15 @@ func (p *pusher) whisper(ctx context.Context, conn *joaju.Connection, f Frame) e
 // this server is on.
 //
 // It runs after [joaju.Channel.Broadcast] and never instead of it, and it
-// answers nothing because there is nothing a client could do with the answer:
+// answers nothing because there is nothing a caller could do with the answer:
 // every socket on this instance already has the message, and a bus that is down
-// costs reach and not delivery. [joaju.Carrier.Carry] records the failure,
-// where the same decision is made for the events API.
+// costs reach and not delivery. [joaju.Carrier.Carry] records the failure.
 //
 // No lock is held here. [pusher.seatOf] released it before the broadcast, and
-// this runs on the goroutine that reads the sender's socket -- the same one the
-// broadcast ran on.
-func (p *pusher) carry(ctx context.Context, e joaju.Event) {
-	carrier, ok := p.broker.(joaju.Carrier)
+// off a socket this runs on the goroutine that reads the sender's -- the same
+// one the broadcast ran on.
+func carry(ctx context.Context, broker joaju.Broker, e joaju.Event) {
+	carrier, ok := broker.(joaju.Carrier)
 	if !ok {
 		return
 	}

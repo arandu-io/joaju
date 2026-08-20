@@ -1421,26 +1421,6 @@ func (b relayedBroker) Remove(ctx context.Context, g auth.Grant, name ChannelNam
 	return b.relay.Leave(name)
 }
 
-// carry hands the fleet an event the events API published here, and is the
-// outbound half of horizontal scaling for that half of the server.
-//
-// It is called by [Server.publish] after [Channel.Broadcast] and never instead
-// of it, which is the order [Relay] describes: the sockets here were served by
-// the broadcast, and this is only about the instances holding the others. The
-// other way out is [pusher.carry], which is a frame off a socket rather than a
-// request, and both end in [Relay.carry].
-//
-// A server with no relay is a deployment of one, and there is nobody to carry to.
-// What becomes of a failure is [Relay.carry]'s to decide -- nothing here can fail
-// the request, and the caller was told its event was delivered, because it was.
-func (s *Server) carry(ctx context.Context, e Event) {
-	if s.relay == nil {
-		return
-	}
-
-	s.relay.carry(ctx, e)
-}
-
 // tenantConnections is how many sockets this instance holds for one tenant, and
 // is what it answers the fleet with. It is [fleetLocal].
 //
@@ -1490,20 +1470,4 @@ func (s *Server) Fleet(ctx context.Context, g auth.Grant, channel string) FleetT
 	}
 
 	return s.relay.ask(ctx, g, channel)
-}
-
-// fleetPresence reports whether a channel only the other instances hold
-// publishes its members, so that the channel list can say how many people are
-// on one this instance has never seen.
-//
-// The kind is read through [ChannelName.Type], which is the one place a
-// prefix is compared, and the name is built under the asking Grant --
-// so the [ChannelName] it goes through carries this request's own tenant and
-// never one that arrived with an answer. A name the fleet answered with that
-// cannot be a name here is not a presence channel and is not anything else
-// either.
-func fleetPresence(g auth.Grant, requested string) bool {
-	name, err := NewChannelName(g, requested)
-
-	return err == nil && name.Type().Presence()
 }

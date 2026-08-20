@@ -79,9 +79,11 @@ const (
 //	/app/{appKey}      a browser opening a socket, no credential at all
 //	/up                the health check, which discloses nothing
 //
-// This is not a second way to prove who is calling, which [joaju.Server]'s own
-// documentation rules out. It is the first and only way in this deployment: no
-// host application stands in front of this process, so nothing else in it
+// This is not a second way to prove who is calling, which is what the routes
+// themselves rule out: mounted inside an application they verify no credential
+// of their own, because the request has already been through that
+// application's front door. It is the first and only way in this deployment --
+// no host application stands in front of this process, so nothing else in it
 // authenticates anybody.
 //
 // What it does NOT do is take a tenant off the request. The tenant is the
