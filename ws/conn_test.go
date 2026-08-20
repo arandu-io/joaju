@@ -104,7 +104,11 @@ func TestFraming(t *testing.T) {
 					for _, writer := range writers {
 						name := fmt.Sprintf("z:%v, s:%v, r:%s, n:%d w:%s", compress, isServer, chunker.name, n, writer.name)
 
-						w, err := wc.NextWriter(TextMessage)
+						// Binary, not text: the bytes below are every value from
+						// 0 to 255 and the message is about framing, not about
+						// what the payload means. A text message is held to
+						// UTF-8 by section 5.6.
+						w, err := wc.NextWriter(BinaryMessage)
 						if err != nil {
 							t.Errorf("%s: wc.NextWriter() returned %v", name, err)
 							continue
@@ -121,7 +125,7 @@ func TestFraming(t *testing.T) {
 						}
 
 						opCode, r, err := rc.NextReader()
-						if err != nil || opCode != TextMessage {
+						if err != nil || opCode != BinaryMessage {
 							t.Errorf("%s: NextReader() returned %d, r, %v", name, opCode, err)
 							continue
 						}

@@ -1039,6 +1039,13 @@ func (c *Conn) NextReader() (messageType int, r io.Reader, err error) {
 			if c.readDecompress {
 				c.reader = c.newDecompressionReader(c.reader)
 			}
+			if frameType == TextMessage {
+				// Outermost, so that what is checked is the text the
+				// application is about to read. Wrapping the frame reader
+				// instead would check the compressed bytes, which are not text
+				// and are not what section 5.6 is about.
+				c.reader = &textReader{c: c, r: c.reader}
+			}
 			return frameType, c.reader, nil
 		}
 	}
@@ -1052,6 +1059,41 @@ func (c *Conn) NextReader() (messageType int, r io.Reader, err error) {
 	}
 
 	return noFrame, nil, c.readErr
+}
+
+// textReader fails the connection when a text message is not valid UTF-8.
+//
+// Section 5.6 says a text message is UTF-8 and section 8.1 says the connection
+// is failed with 1007 when it is not. The check runs while the application
+// reads, so a bad byte ends the connection at the byte rather than after a
+// message that may be enormous.
+type textReader struct {
+	c *Conn
+	r io.ReadCloser
+	v utf8Validator
+}
+
+func (t *textReader) Read(b []byte) (int, error) {
+	n, err := t.r.Read(b)
+	if n > 0 && !t.v.write(b[:n]) {
+		return 0, t.fail()
+	}
+	if err == io.EOF && !t.v.complete() {
+		// Every byte was legal on its own and the message still ends halfway
+		// through a rune.
+		return 0, t.fail()
+	}
+	return n, err
+}
+
+func (t *textReader) Close() error { return t.r.Close() }
+
+// fail records the error so that every later read reports it, and tells the peer
+// which of its bytes was refused.
+func (t *textReader) fail() error {
+	err := t.c.handleCloseWithCode(CloseInvalidFramePayloadData, "invalid utf8 payload in text frame")
+	t.c.readErr = err
+	return err
 }
 
 type messageReader struct{ c *Conn }
