@@ -1,386 +1,746 @@
+// Copyright 2013 The HYZIS WebSocket Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
 package ws
 
 import (
 	"bufio"
 	"bytes"
 	"errors"
+	"fmt"
+	"io"
 	"net"
+	"reflect"
+	"sync"
 	"testing"
+	"testing/iotest"
 	"time"
 )
 
-// connPair is a client and a server on a real loopback socket.
-//
-// Loopback rather than net.Pipe because net.Pipe is unbuffered: every write
-// blocks until the other side reads it, so a close handshake -- where one side
-// writes an echo the other has not asked for yet -- deadlocks on the pipe and
-// works on a socket. The socket is what production has.
-func connPair(t *testing.T) (client, server *Conn) {
-	t.Helper()
+var _ net.Error = errWriteTimeout
 
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listening = %v", err)
+type fakeNetConn struct {
+	io.Reader
+	io.Writer
+}
+
+func (c fakeNetConn) Close() error                       { return nil }
+func (c fakeNetConn) LocalAddr() net.Addr                { return localAddr }
+func (c fakeNetConn) RemoteAddr() net.Addr               { return remoteAddr }
+func (c fakeNetConn) SetDeadline(t time.Time) error      { return nil }
+func (c fakeNetConn) SetReadDeadline(t time.Time) error  { return nil }
+func (c fakeNetConn) SetWriteDeadline(t time.Time) error { return nil }
+
+type fakeAddr int
+
+var (
+	localAddr  = fakeAddr(1)
+	remoteAddr = fakeAddr(2)
+)
+
+func (a fakeAddr) Network() string {
+	return "net"
+}
+
+func (a fakeAddr) String() string {
+	return "str"
+}
+
+// newTestConn creates a connection backed by a fake network connection using
+// default values for buffering.
+func newTestConn(r io.Reader, w io.Writer, isServer bool) *Conn {
+	return newConn(fakeNetConn{Reader: r, Writer: w}, isServer, 1024, 1024, nil, nil, nil)
+}
+
+func TestFraming(t *testing.T) {
+	frameSizes := []int{
+		0, 1, 2, 124, 125, 126, 127, 128, 129, 65534, 65535,
+		// 65536, 65537
 	}
-	defer func() { _ = listener.Close() }()
+	var readChunkers = []struct {
+		name string
+		f    func(io.Reader) io.Reader
+	}{
+		{"half", iotest.HalfReader},
+		{"one", iotest.OneByteReader},
+		{"asis", func(r io.Reader) io.Reader { return r }},
+	}
+	writeBuf := make([]byte, 65537)
+	for i := range writeBuf {
+		writeBuf[i] = byte(i)
+	}
+	var writers = []struct {
+		name string
+		f    func(w io.Writer, n int) (int, error)
+	}{
+		{"iocopy", func(w io.Writer, n int) (int, error) {
+			nn, err := io.Copy(w, bytes.NewReader(writeBuf[:n]))
+			return int(nn), err
+		}},
+		{"write", func(w io.Writer, n int) (int, error) {
+			return w.Write(writeBuf[:n])
+		}},
+		{"string", func(w io.Writer, n int) (int, error) {
+			return io.WriteString(w, string(writeBuf[:n]))
+		}},
+	}
 
-	accepted := make(chan net.Conn, 1)
-	go func() {
-		conn, err := listener.Accept()
-		if err != nil {
-			accepted <- nil
+	for _, compress := range []bool{false, true} {
+		for _, isServer := range []bool{true, false} {
+			for _, chunker := range readChunkers {
 
-			return
+				var connBuf bytes.Buffer
+				wc := newTestConn(nil, &connBuf, isServer)
+				rc := newTestConn(chunker.f(&connBuf), nil, !isServer)
+				if compress {
+					wc.newCompressionWriter = compressNoContextTakeover
+					rc.newDecompressionReader = decompressNoContextTakeover
+				}
+				for _, n := range frameSizes {
+					for _, writer := range writers {
+						name := fmt.Sprintf("z:%v, s:%v, r:%s, n:%d w:%s", compress, isServer, chunker.name, n, writer.name)
+
+						w, err := wc.NextWriter(TextMessage)
+						if err != nil {
+							t.Errorf("%s: wc.NextWriter() returned %v", name, err)
+							continue
+						}
+						nn, err := writer.f(w, n)
+						if err != nil || nn != n {
+							t.Errorf("%s: w.Write(writeBuf[:n]) returned %d, %v", name, nn, err)
+							continue
+						}
+						err = w.Close()
+						if err != nil {
+							t.Errorf("%s: w.Close() returned %v", name, err)
+							continue
+						}
+
+						opCode, r, err := rc.NextReader()
+						if err != nil || opCode != TextMessage {
+							t.Errorf("%s: NextReader() returned %d, r, %v", name, opCode, err)
+							continue
+						}
+
+						t.Logf("frame size: %d", n)
+						rbuf, err := io.ReadAll(r)
+						if err != nil {
+							t.Errorf("%s: ReadFull() returned rbuf, %v", name, err)
+							continue
+						}
+
+						if len(rbuf) != n {
+							t.Errorf("%s: len(rbuf) is %d, want %d", name, len(rbuf), n)
+							continue
+						}
+
+						for i, b := range rbuf {
+							if byte(i) != b {
+								t.Errorf("%s: bad byte at offset %d", name, i)
+								break
+							}
+						}
+					}
+				}
+			}
 		}
-		accepted <- conn
+	}
+}
+
+func TestWriteControlDeadline(t *testing.T) {
+	t.Parallel()
+	message := []byte("hello")
+	var connBuf bytes.Buffer
+	c := newTestConn(nil, &connBuf, true)
+	if err := c.WriteControl(PongMessage, message, time.Time{}); err != nil {
+		t.Errorf("WriteControl(..., zero deadline) = %v, want nil", err)
+	}
+	if err := c.WriteControl(PongMessage, message, time.Now().Add(time.Second)); err != nil {
+		t.Errorf("WriteControl(..., future deadline) = %v, want nil", err)
+	}
+	if err := c.WriteControl(PongMessage, message, time.Now().Add(-time.Second)); err == nil {
+		t.Errorf("WriteControl(..., past deadline) = nil, want timeout error")
+	}
+}
+
+func TestConcurrencyWriteControl(t *testing.T) {
+	const message = "this is a ping/pong messsage"
+	loop := 10
+	workers := 10
+	for i := 0; i < loop; i++ {
+		var connBuf bytes.Buffer
+
+		wg := sync.WaitGroup{}
+		wc := newTestConn(nil, &connBuf, true)
+
+		for i := 0; i < workers; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				if err := wc.WriteControl(PongMessage, []byte(message), time.Now().Add(time.Second)); err != nil {
+					t.Errorf("concurrently wc.WriteControl() returned %v", err)
+				}
+			}()
+		}
+
+		wg.Wait()
+		wc.Close()
+	}
+}
+
+func TestControl(t *testing.T) {
+	const message = "this is a ping/pong message"
+	for _, isServer := range []bool{true, false} {
+		for _, isWriteControl := range []bool{true, false} {
+			name := fmt.Sprintf("s:%v, wc:%v", isServer, isWriteControl)
+			var connBuf bytes.Buffer
+			wc := newTestConn(nil, &connBuf, isServer)
+			rc := newTestConn(&connBuf, nil, !isServer)
+			if isWriteControl {
+				_ = wc.WriteControl(PongMessage, []byte(message), time.Now().Add(time.Second))
+			} else {
+				w, err := wc.NextWriter(PongMessage)
+				if err != nil {
+					t.Errorf("%s: wc.NextWriter() returned %v", name, err)
+					continue
+				}
+				if _, err := w.Write([]byte(message)); err != nil {
+					t.Errorf("%s: w.Write() returned %v", name, err)
+					continue
+				}
+				if err := w.Close(); err != nil {
+					t.Errorf("%s: w.Close() returned %v", name, err)
+					continue
+				}
+				var actualMessage string
+				rc.SetPongHandler(func(s string) error { actualMessage = s; return nil })
+				_, _, _ = rc.NextReader()
+				if actualMessage != message {
+					t.Errorf("%s: pong=%q, want %q", name, actualMessage, message)
+					continue
+				}
+			}
+		}
+	}
+}
+
+// simpleBufferPool is an implementation of BufferPool for TestWriteBufferPool.
+type simpleBufferPool struct {
+	v interface{}
+}
+
+func (p *simpleBufferPool) Get() interface{} {
+	v := p.v
+	p.v = nil
+	return v
+}
+
+func (p *simpleBufferPool) Put(v interface{}) {
+	p.v = v
+}
+
+func TestWriteBufferPool(t *testing.T) {
+	const message = "Now is the time for all good people to come to the aid of the party."
+
+	var buf bytes.Buffer
+	var pool simpleBufferPool
+	rc := newTestConn(&buf, nil, false)
+
+	// Specify writeBufferSize smaller than message size to ensure that pooling
+	// works with fragmented messages.
+	wc := newConn(fakeNetConn{Writer: &buf}, true, 1024, len(message)-1, &pool, nil, nil)
+
+	if wc.writeBuf != nil {
+		t.Fatal("writeBuf not nil after create")
+	}
+
+	// Part 1: test NextWriter/Write/Close
+
+	w, err := wc.NextWriter(TextMessage)
+	if err != nil {
+		t.Fatalf("wc.NextWriter() returned %v", err)
+	}
+
+	if wc.writeBuf == nil {
+		t.Fatal("writeBuf is nil after NextWriter")
+	}
+
+	writeBufAddr := &wc.writeBuf[0]
+
+	if _, err := io.WriteString(w, message); err != nil {
+		t.Fatalf("io.WriteString(w, message) returned %v", err)
+	}
+
+	if err := w.Close(); err != nil {
+		t.Fatalf("w.Close() returned %v", err)
+	}
+
+	if wc.writeBuf != nil {
+		t.Fatal("writeBuf not nil after w.Close()")
+	}
+
+	if wpd, ok := pool.v.(writePoolData); !ok || len(wpd.buf) == 0 || &wpd.buf[0] != writeBufAddr {
+		t.Fatal("writeBuf not returned to pool")
+	}
+
+	opCode, p, err := rc.ReadMessage()
+	if opCode != TextMessage || err != nil {
+		t.Fatalf("ReadMessage() returned %d, p, %v", opCode, err)
+	}
+
+	if s := string(p); s != message {
+		t.Fatalf("message is %s, want %s", s, message)
+	}
+
+	// Part 2: Test WriteMessage.
+
+	if err := wc.WriteMessage(TextMessage, []byte(message)); err != nil {
+		t.Fatalf("wc.WriteMessage() returned %v", err)
+	}
+
+	if wc.writeBuf != nil {
+		t.Fatal("writeBuf not nil after wc.WriteMessage()")
+	}
+
+	if wpd, ok := pool.v.(writePoolData); !ok || len(wpd.buf) == 0 || &wpd.buf[0] != writeBufAddr {
+		t.Fatal("writeBuf not returned to pool after WriteMessage")
+	}
+
+	opCode, p, err = rc.ReadMessage()
+	if opCode != TextMessage || err != nil {
+		t.Fatalf("ReadMessage() returned %d, p, %v", opCode, err)
+	}
+
+	if s := string(p); s != message {
+		t.Fatalf("message is %s, want %s", s, message)
+	}
+}
+
+// TestWriteBufferPoolSync ensures that *sync.Pool works as a buffer pool.
+func TestWriteBufferPoolSync(t *testing.T) {
+	var buf bytes.Buffer
+	var pool sync.Pool
+	wc := newConn(fakeNetConn{Writer: &buf}, true, 1024, 1024, &pool, nil, nil)
+	rc := newTestConn(&buf, nil, false)
+
+	const message = "Hello World!"
+	for i := 0; i < 3; i++ {
+		if err := wc.WriteMessage(TextMessage, []byte(message)); err != nil {
+			t.Fatalf("wc.WriteMessage() returned %v", err)
+		}
+		opCode, p, err := rc.ReadMessage()
+		if opCode != TextMessage || err != nil {
+			t.Fatalf("ReadMessage() returned %d, p, %v", opCode, err)
+		}
+		if s := string(p); s != message {
+			t.Fatalf("message is %s, want %s", s, message)
+		}
+	}
+}
+
+// errorWriter is an io.Writer than returns an error on all writes.
+type errorWriter struct{}
+
+func (ew errorWriter) Write(p []byte) (int, error) { return 0, errors.New("error") }
+
+// TestWriteBufferPoolError ensures that buffer is returned to pool after error
+// on write.
+func TestWriteBufferPoolError(t *testing.T) {
+
+	// Part 1: Test NextWriter/Write/Close
+
+	var pool simpleBufferPool
+	wc := newConn(fakeNetConn{Writer: errorWriter{}}, true, 1024, 1024, &pool, nil, nil)
+
+	w, err := wc.NextWriter(TextMessage)
+	if err != nil {
+		t.Fatalf("wc.NextWriter() returned %v", err)
+	}
+
+	if wc.writeBuf == nil {
+		t.Fatal("writeBuf is nil after NextWriter")
+	}
+
+	writeBufAddr := &wc.writeBuf[0]
+
+	if _, err := io.WriteString(w, "Hello"); err != nil {
+		t.Fatalf("io.WriteString(w, message) returned %v", err)
+	}
+
+	if err := w.Close(); err == nil {
+		t.Fatalf("w.Close() did not return error")
+	}
+
+	if wpd, ok := pool.v.(writePoolData); !ok || len(wpd.buf) == 0 || &wpd.buf[0] != writeBufAddr {
+		t.Fatal("writeBuf not returned to pool")
+	}
+
+	// Part 2: Test WriteMessage
+
+	wc = newConn(fakeNetConn{Writer: errorWriter{}}, true, 1024, 1024, &pool, nil, nil)
+
+	if err := wc.WriteMessage(TextMessage, []byte("Hello")); err == nil {
+		t.Fatalf("wc.WriteMessage did not return error")
+	}
+
+	if wpd, ok := pool.v.(writePoolData); !ok || len(wpd.buf) == 0 || &wpd.buf[0] != writeBufAddr {
+		t.Fatal("writeBuf not returned to pool")
+	}
+}
+
+func TestCloseFrameBeforeFinalMessageFrame(t *testing.T) {
+	const bufSize = 512
+
+	expectedErr := &CloseError{Code: CloseNormalClosure, Text: "hello"}
+
+	var b1, b2 bytes.Buffer
+	wc := newConn(&fakeNetConn{Reader: nil, Writer: &b1}, false, 1024, bufSize, nil, nil, nil)
+	rc := newTestConn(&b1, &b2, true)
+
+	w, _ := wc.NextWriter(BinaryMessage)
+	_, _ = w.Write(make([]byte, bufSize+bufSize/2))
+	_ = wc.WriteControl(CloseMessage, FormatCloseMessage(expectedErr.Code, expectedErr.Text), time.Now().Add(10*time.Second))
+	w.Close()
+
+	op, r, err := rc.NextReader()
+	if op != BinaryMessage || err != nil {
+		t.Fatalf("NextReader() returned %d, %v", op, err)
+	}
+	_, err = io.Copy(io.Discard, r)
+	if !reflect.DeepEqual(err, expectedErr) {
+		t.Fatalf("io.Copy() returned %v, want %v", err, expectedErr)
+	}
+	_, _, err = rc.NextReader()
+	if !reflect.DeepEqual(err, expectedErr) {
+		t.Fatalf("NextReader() returned %v, want %v", err, expectedErr)
+	}
+}
+
+func TestEOFWithinFrame(t *testing.T) {
+	const bufSize = 64
+
+	for n := 0; ; n++ {
+		var b bytes.Buffer
+		wc := newTestConn(nil, &b, false)
+		rc := newTestConn(&b, nil, true)
+
+		w, _ := wc.NextWriter(BinaryMessage)
+		_, _ = w.Write(make([]byte, bufSize))
+		w.Close()
+
+		if n >= b.Len() {
+			break
+		}
+		b.Truncate(n)
+
+		op, r, err := rc.NextReader()
+		if err == errUnexpectedEOF {
+			continue
+		}
+		if op != BinaryMessage || err != nil {
+			t.Fatalf("%d: NextReader() returned %d, %v", n, op, err)
+		}
+		_, err = io.Copy(io.Discard, r)
+		if err != errUnexpectedEOF {
+			t.Fatalf("%d: io.Copy() returned %v, want %v", n, err, errUnexpectedEOF)
+		}
+		_, _, err = rc.NextReader()
+		if err != errUnexpectedEOF {
+			t.Fatalf("%d: NextReader() returned %v, want %v", n, err, errUnexpectedEOF)
+		}
+	}
+}
+
+func TestEOFBeforeFinalFrame(t *testing.T) {
+	const bufSize = 512
+
+	var b1, b2 bytes.Buffer
+	wc := newConn(&fakeNetConn{Writer: &b1}, false, 1024, bufSize, nil, nil, nil)
+	rc := newTestConn(&b1, &b2, true)
+
+	w, _ := wc.NextWriter(BinaryMessage)
+	_, _ = w.Write(make([]byte, bufSize+bufSize/2))
+
+	op, r, err := rc.NextReader()
+	if op != BinaryMessage || err != nil {
+		t.Fatalf("NextReader() returned %d, %v", op, err)
+	}
+	_, err = io.Copy(io.Discard, r)
+	if err != errUnexpectedEOF {
+		t.Fatalf("io.Copy() returned %v, want %v", err, errUnexpectedEOF)
+	}
+	_, _, err = rc.NextReader()
+	if err != errUnexpectedEOF {
+		t.Fatalf("NextReader() returned %v, want %v", err, errUnexpectedEOF)
+	}
+}
+
+func TestWriteAfterMessageWriterClose(t *testing.T) {
+	wc := newTestConn(nil, &bytes.Buffer{}, false)
+	w, _ := wc.NextWriter(BinaryMessage)
+	_, _ = io.WriteString(w, "hello")
+	if err := w.Close(); err != nil {
+		t.Fatalf("unexpected error closing message writer, %v", err)
+	}
+
+	if _, err := io.WriteString(w, "world"); err == nil {
+		t.Fatalf("no error writing after close")
+	}
+
+	w, _ = wc.NextWriter(BinaryMessage)
+	_, _ = io.WriteString(w, "hello")
+
+	// close w by getting next writer
+	_, err := wc.NextWriter(BinaryMessage)
+	if err != nil {
+		t.Fatalf("unexpected error getting next writer, %v", err)
+	}
+
+	if _, err := io.WriteString(w, "world"); err == nil {
+		t.Fatalf("no error writing after close")
+	}
+}
+
+func TestReadLimit(t *testing.T) {
+	t.Run("Test ReadLimit is enforced", func(t *testing.T) {
+		const readLimit = 512
+		message := make([]byte, readLimit+1)
+
+		var b1, b2 bytes.Buffer
+		wc := newConn(&fakeNetConn{Writer: &b1}, false, 1024, readLimit-2, nil, nil, nil)
+		rc := newTestConn(&b1, &b2, true)
+		rc.SetReadLimit(readLimit)
+
+		// Send message at the limit with interleaved pong.
+		w, _ := wc.NextWriter(BinaryMessage)
+		_, _ = w.Write(message[:readLimit-1])
+		_ = wc.WriteControl(PongMessage, []byte("this is a pong"), time.Now().Add(10*time.Second))
+		_, _ = w.Write(message[:1])
+		w.Close()
+
+		// Send message larger than the limit.
+		_ = wc.WriteMessage(BinaryMessage, message[:readLimit+1])
+
+		op, _, err := rc.NextReader()
+		if op != BinaryMessage || err != nil {
+			t.Fatalf("1: NextReader() returned %d, %v", op, err)
+		}
+		op, r, err := rc.NextReader()
+		if op != BinaryMessage || err != nil {
+			t.Fatalf("2: NextReader() returned %d, %v", op, err)
+		}
+		_, err = io.Copy(io.Discard, r)
+		if err != ErrReadLimit {
+			t.Fatalf("io.Copy() returned %v", err)
+		}
+	})
+
+	t.Run("Test that ReadLimit cannot be overflowed", func(t *testing.T) {
+		const readLimit = 1
+
+		var b1, b2 bytes.Buffer
+		rc := newTestConn(&b1, &b2, true)
+		rc.SetReadLimit(readLimit)
+
+		// First, send a non-final binary message
+		b1.Write([]byte("\x02\x81"))
+
+		// Mask key
+		b1.Write([]byte("\x00\x00\x00\x00"))
+
+		// First payload
+		b1.Write([]byte("A"))
+
+		// Next, send a negative-length, non-final continuation frame
+		b1.Write([]byte("\x00\xFF\x80\x00\x00\x00\x00\x00\x00\x00"))
+
+		// Mask key
+		b1.Write([]byte("\x00\x00\x00\x00"))
+
+		// Next, send a too long, final continuation frame
+		b1.Write([]byte("\x80\xFF\x00\x00\x00\x00\x00\x00\x00\x05"))
+
+		// Mask key
+		b1.Write([]byte("\x00\x00\x00\x00"))
+
+		// Too-long payload
+		b1.Write([]byte("BCDEF"))
+
+		op, r, err := rc.NextReader()
+		if op != BinaryMessage || err != nil {
+			t.Fatalf("1: NextReader() returned %d, %v", op, err)
+		}
+
+		var buf [10]byte
+		var read int
+		n, err := r.Read(buf[:])
+		if err != nil && err != ErrReadLimit {
+			t.Fatalf("unexpected error testing read limit: %v", err)
+		}
+		read += n
+
+		n, err = r.Read(buf[:])
+		if err != nil && err != ErrReadLimit {
+			t.Fatalf("unexpected error testing read limit: %v", err)
+		}
+		read += n
+
+		if err == nil && read > readLimit {
+			t.Fatalf("read limit exceeded: limit %d, read %d", readLimit, read)
+		}
+	})
+}
+
+func TestAddrs(t *testing.T) {
+	c := newTestConn(nil, nil, true)
+	if c.LocalAddr() != localAddr {
+		t.Errorf("LocalAddr = %v, want %v", c.LocalAddr(), localAddr)
+	}
+	if c.RemoteAddr() != remoteAddr {
+		t.Errorf("RemoteAddr = %v, want %v", c.RemoteAddr(), remoteAddr)
+	}
+}
+
+func TestDeprecatedUnderlyingConn(t *testing.T) {
+	var b1, b2 bytes.Buffer
+	fc := fakeNetConn{Reader: &b1, Writer: &b2}
+	c := newConn(fc, true, 1024, 1024, nil, nil, nil)
+	ul := c.UnderlyingConn()
+	if ul != fc {
+		t.Fatalf("Underlying conn is not what it should be.")
+	}
+}
+
+func TestNetConn(t *testing.T) {
+	var b1, b2 bytes.Buffer
+	fc := fakeNetConn{Reader: &b1, Writer: &b2}
+	c := newConn(fc, true, 1024, 1024, nil, nil, nil)
+	ul := c.NetConn()
+	if ul != fc {
+		t.Fatalf("Underlying conn is not what it should be.")
+	}
+}
+
+func TestBufioReadBytes(t *testing.T) {
+	// Test calling bufio.ReadBytes for value longer than read buffer size.
+
+	m := make([]byte, 512)
+	m[len(m)-1] = '\n'
+
+	var b1, b2 bytes.Buffer
+	wc := newConn(fakeNetConn{Writer: &b1}, false, len(m)+64, len(m)+64, nil, nil, nil)
+	rc := newConn(fakeNetConn{Reader: &b1, Writer: &b2}, true, len(m)-64, len(m)-64, nil, nil, nil)
+
+	w, _ := wc.NextWriter(BinaryMessage)
+	_, _ = w.Write(m)
+	w.Close()
+
+	op, r, err := rc.NextReader()
+	if op != BinaryMessage || err != nil {
+		t.Fatalf("NextReader() returned %d, %v", op, err)
+	}
+
+	br := bufio.NewReader(r)
+	p, err := br.ReadBytes('\n')
+	if err != nil {
+		t.Fatalf("ReadBytes() returned %v", err)
+	}
+	if len(p) != len(m) {
+		t.Fatalf("read returned %d bytes, want %d bytes", len(p), len(m))
+	}
+}
+
+var closeErrorTests = []struct {
+	err   error
+	codes []int
+	ok    bool
+}{
+	{&CloseError{Code: CloseNormalClosure}, []int{CloseNormalClosure}, true},
+	{&CloseError{Code: CloseNormalClosure}, []int{CloseNoStatusReceived}, false},
+	{&CloseError{Code: CloseNormalClosure}, []int{CloseNoStatusReceived, CloseNormalClosure}, true},
+	{errors.New("hello"), []int{CloseNormalClosure}, false},
+}
+
+func TestCloseError(t *testing.T) {
+	for _, tt := range closeErrorTests {
+		ok := IsCloseError(tt.err, tt.codes...)
+		if ok != tt.ok {
+			t.Errorf("IsCloseError(%#v, %#v) returned %v, want %v", tt.err, tt.codes, ok, tt.ok)
+		}
+	}
+}
+
+var unexpectedCloseErrorTests = []struct {
+	err   error
+	codes []int
+	ok    bool
+}{
+	{&CloseError{Code: CloseNormalClosure}, []int{CloseNormalClosure}, false},
+	{&CloseError{Code: CloseNormalClosure}, []int{CloseNoStatusReceived}, true},
+	{&CloseError{Code: CloseNormalClosure}, []int{CloseNoStatusReceived, CloseNormalClosure}, false},
+	{errors.New("hello"), []int{CloseNormalClosure}, false},
+}
+
+func TestUnexpectedCloseErrors(t *testing.T) {
+	for _, tt := range unexpectedCloseErrorTests {
+		ok := IsUnexpectedCloseError(tt.err, tt.codes...)
+		if ok != tt.ok {
+			t.Errorf("IsUnexpectedCloseError(%#v, %#v) returned %v, want %v", tt.err, tt.codes, ok, tt.ok)
+		}
+	}
+}
+
+type blockingWriter struct {
+	c1, c2 chan struct{}
+}
+
+func (w blockingWriter) Write(p []byte) (int, error) {
+	// Allow main to continue
+	close(w.c1)
+	// Wait for panic in main
+	<-w.c2
+	return len(p), nil
+}
+
+func TestConcurrentWritePanic(t *testing.T) {
+	w := blockingWriter{make(chan struct{}), make(chan struct{})}
+	c := newTestConn(nil, w, false)
+	go func() {
+		_ = c.WriteMessage(TextMessage, []byte{})
 	}()
 
-	dialed, err := net.Dial("tcp", listener.Addr().String())
-	if err != nil {
-		t.Fatalf("dialling = %v", err)
-	}
+	// wait for goroutine to block in write.
+	<-w.c1
 
-	serverSide := <-accepted
-	if serverSide == nil {
-		t.Fatal("the listener did not accept")
-	}
-
-	t.Cleanup(func() {
-		_ = dialed.Close()
-		_ = serverSide.Close()
-	})
-
-	return newConn(dialed, bufio.NewReader(dialed), 0, true),
-		newConn(serverSide, bufio.NewReader(serverSide), 0, false)
-}
-
-// readCode reads until the connection ends and returns the close code, which is
-// how every failure test here checks that the peer was told WHY.
-func readCode(t *testing.T, c *Conn) int {
-	t.Helper()
-
-	_ = c.SetReadDeadline(time.Now().Add(2 * time.Second))
-	_, _, err := c.ReadMessage()
-
-	var closeErr *CloseError
-	if !errors.As(err, &closeErr) {
-		t.Fatalf("the connection ended with %v, want a close frame", err)
-	}
-
-	return closeErr.Code
-}
-
-func TestConnCarriesATextMessage(t *testing.T) {
-	client, server := connPair(t)
-
-	want := "não é o desenvolvedor que garante"
-	if err := client.WriteMessage(TextMessage, []byte(want)); err != nil {
-		t.Fatalf("writing = %v", err)
-	}
-
-	kind, got, err := server.ReadMessage()
-	if err != nil {
-		t.Fatalf("reading = %v", err)
-	}
-	if kind != TextMessage || string(got) != want {
-		t.Fatalf("read opcode %d %q, want %d %q", kind, got, TextMessage, want)
-	}
-}
-
-// TestConnJoinsTheFragmentsOfOneMessage is section 5.4, and the opcode of the
-// joined message comes from the FIRST frame -- the continuations carry 0.
-func TestConnJoinsTheFragmentsOfOneMessage(t *testing.T) {
-	client, server := connPair(t)
-
-	for _, frame := range []Frame{
-		{Final: false, Opcode: TextMessage, Payload: []byte("uma ")},
-		{Final: false, Opcode: ContinuationFrame, Payload: []byte("forma ")},
-		{Final: true, Opcode: ContinuationFrame, Payload: []byte("só")},
-	} {
-		if err := client.write(frame); err != nil {
-			t.Fatalf("writing a fragment = %v", err)
+	defer func() {
+		close(w.c2)
+		if v := recover(); v != nil {
+			return
 		}
-	}
+	}()
 
-	kind, got, err := server.ReadMessage()
-	if err != nil {
-		t.Fatalf("reading = %v", err)
-	}
-	if kind != TextMessage || string(got) != "uma forma só" {
-		t.Fatalf("read opcode %d %q", kind, got)
-	}
+	_ = c.WriteMessage(TextMessage, []byte{})
+	t.Fatal("should not get here")
 }
 
-// TestConnAnswersAPingWithItsPayload is section 5.5.3: the pong carries the
-// ping's application data back, byte for byte.
-func TestConnAnswersAPingWithItsPayload(t *testing.T) {
-	client, server := connPair(t)
+type failingReader struct{}
 
-	pongs := make(chan string, 1)
-	client.SetPongHandler(func(data string) error {
-		pongs <- data
+func (r failingReader) Read(p []byte) (int, error) {
+	return 0, io.EOF
+}
 
-		return nil
-	})
+func TestFailedConnectionReadPanic(t *testing.T) {
+	c := newTestConn(failingReader{}, nil, false)
 
-	go func() { _, _, _ = server.ReadMessage() }()
-	go func() { _, _, _ = client.ReadMessage() }()
-
-	if err := client.WriteMessage(PingMessage, []byte("still here")); err != nil {
-		t.Fatalf("writing the ping = %v", err)
-	}
-
-	select {
-	case got := <-pongs:
-		if got != "still here" {
-			t.Fatalf("the pong carried %q", got)
+	defer func() {
+		if v := recover(); v != nil {
+			return
 		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("no pong answered the ping")
+	}()
+
+	for i := 0; i < 20000; i++ {
+		_, _, _ = c.ReadMessage()
 	}
-}
-
-// TestConnEchoesACloseAndReportsItToBothSides is the handshake of section 5.5.1.
-func TestConnEchoesACloseAndReportsItToBothSides(t *testing.T) {
-	client, server := connPair(t)
-
-	echoed := make(chan int, 1)
-	go func() { echoed <- readCode(t, client) }()
-
-	if err := client.WriteMessage(CloseMessage, FormatClose(CloseGoingAway, "leaving")); err != nil {
-		t.Fatalf("writing the close = %v", err)
-	}
-
-	_, _, err := server.ReadMessage()
-	var closeErr *CloseError
-	if !errors.As(err, &closeErr) {
-		t.Fatalf("the server read %v, want a close", err)
-	}
-	if closeErr.Code != CloseGoingAway || closeErr.Reason != "leaving" {
-		t.Fatalf("the server read close %d %q", closeErr.Code, closeErr.Reason)
-	}
-
-	select {
-	case code := <-echoed:
-		if code != CloseGoingAway {
-			t.Fatalf("the echo carried %d, want %d", code, CloseGoingAway)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("the close was never echoed")
-	}
-}
-
-// TestConnRefusesToWriteAfterTheCloseFrame is section 5.5.1, and it is what
-// keeps a shutdown from racing a broadcast onto a socket that is finished.
-func TestConnRefusesToWriteAfterTheCloseFrame(t *testing.T) {
-	client, _ := connPair(t)
-
-	if err := client.WriteMessage(CloseMessage, FormatClose(CloseNormalClosure, "")); err != nil {
-		t.Fatalf("writing the close = %v", err)
-	}
-	if err := client.WriteMessage(TextMessage, []byte("late")); !errors.Is(err, ErrCloseSent) {
-		t.Fatalf("writing after the close = %v, want %v", err, ErrCloseSent)
-	}
-}
-
-// TestConnFailsTheConnectionWithTheCodeThatSaysWhy is what the Autobahn suite
-// spends most of its cases on: not whether the connection ends, but whether the
-// peer is told which rule it broke.
-func TestConnFailsTheConnectionWithTheCodeThatSaysWhy(t *testing.T) {
-	for _, one := range []struct {
-		name  string
-		limit int64
-		send  func(t *testing.T, client *Conn)
-		want  int
-	}{
-		{
-			name: "text that is not UTF-8",
-			send: func(t *testing.T, client *Conn) {
-				if err := client.write(Frame{Final: true, Opcode: TextMessage, Payload: []byte{0xc0, 0xaf}}); err != nil {
-					t.Fatalf("writing = %v", err)
-				}
-			},
-			want: CloseInvalidFramePayloadData,
-		},
-		{
-			name: "text that ends halfway through a rune",
-			send: func(t *testing.T, client *Conn) {
-				if err := client.write(Frame{Final: true, Opcode: TextMessage, Payload: []byte{0xf0, 0x9f}}); err != nil {
-					t.Fatalf("writing = %v", err)
-				}
-			},
-			want: CloseInvalidFramePayloadData,
-		},
-		{
-			name:  "a message over the limit",
-			limit: 4,
-			send: func(t *testing.T, client *Conn) {
-				if err := client.WriteMessage(BinaryMessage, bytes.Repeat([]byte{0}, 64)); err != nil {
-					t.Fatalf("writing = %v", err)
-				}
-			},
-			want: CloseMessageTooBig,
-		},
-		{
-			name:  "fragments that add up to more than the limit",
-			limit: 4,
-			send: func(t *testing.T, client *Conn) {
-				for _, frame := range []Frame{
-					{Final: false, Opcode: BinaryMessage, Payload: []byte{1, 2, 3}},
-					{Final: true, Opcode: ContinuationFrame, Payload: []byte{4, 5, 6}},
-				} {
-					if err := client.write(frame); err != nil {
-						t.Fatalf("writing = %v", err)
-					}
-				}
-			},
-			want: CloseMessageTooBig,
-		},
-		{
-			name: "a reserved bit with no extension negotiated",
-			send: func(t *testing.T, client *Conn) {
-				if _, err := client.conn.Write([]byte{0xc1, 0x80, 0, 0, 0, 0}); err != nil {
-					t.Fatalf("writing = %v", err)
-				}
-			},
-			want: CloseProtocolError,
-		},
-		{
-			name: "an unmasked frame from a client",
-			send: func(t *testing.T, client *Conn) {
-				if _, err := client.conn.Write([]byte{0x81, 0x00}); err != nil {
-					t.Fatalf("writing = %v", err)
-				}
-			},
-			want: CloseProtocolError,
-		},
-		{
-			name: "a continuation with nothing to continue",
-			send: func(t *testing.T, client *Conn) {
-				if err := client.write(Frame{Final: true, Opcode: ContinuationFrame, Payload: []byte("x")}); err != nil {
-					t.Fatalf("writing = %v", err)
-				}
-			},
-			want: CloseProtocolError,
-		},
-		{
-			name: "a new message while one is still open",
-			send: func(t *testing.T, client *Conn) {
-				for _, frame := range []Frame{
-					{Final: false, Opcode: TextMessage, Payload: []byte("a")},
-					{Final: true, Opcode: TextMessage, Payload: []byte("b")},
-				} {
-					if err := client.write(frame); err != nil {
-						t.Fatalf("writing = %v", err)
-					}
-				}
-			},
-			want: CloseProtocolError,
-		},
-		{
-			name: "a close carrying a code that may not be sent",
-			send: func(t *testing.T, client *Conn) {
-				if err := client.write(Frame{Final: true, Opcode: CloseMessage, Payload: []byte{0x03, 0xed}}); err != nil {
-					t.Fatalf("writing = %v", err)
-				}
-			},
-			want: CloseProtocolError,
-		},
-	} {
-		t.Run(one.name, func(t *testing.T) {
-			client, server := connPair(t)
-			server.SetReadLimit(one.limit)
-
-			codes := make(chan int, 1)
-			go func() { codes <- readCode(t, client) }()
-
-			one.send(t, client)
-
-			_ = server.SetReadDeadline(time.Now().Add(2 * time.Second))
-			if _, _, err := server.ReadMessage(); err == nil {
-				t.Fatal("the server accepted the frame")
-			}
-
-			select {
-			case code := <-codes:
-				if code != one.want {
-					t.Fatalf("the server closed with %d, want %d", code, one.want)
-				}
-			case <-time.After(2 * time.Second):
-				t.Fatal("the server closed without saying why")
-			}
-		})
-	}
-}
-
-// TestConnKeepsReturningTheSameErrorAfterAFailure is what stops a caller's read
-// loop from spinning: a websocket whose framing failed cannot be resynchronised,
-// so every later call has to say so rather than block or return nothing.
-func TestConnKeepsReturningTheSameErrorAfterAFailure(t *testing.T) {
-	client, server := connPair(t)
-
-	go func() { _, _, _ = client.ReadMessage() }()
-
-	if err := client.write(Frame{Final: true, Opcode: TextMessage, Payload: []byte{0xc0, 0xaf}}); err != nil {
-		t.Fatalf("writing = %v", err)
-	}
-
-	_ = server.SetReadDeadline(time.Now().Add(2 * time.Second))
-	first, _, err := server.ReadMessage()
-	if err == nil {
-		t.Fatalf("the server accepted an invalid message as opcode %d", first)
-	}
-
-	if _, _, again := server.ReadMessage(); !errors.Is(again, err) {
-		t.Fatalf("a second read returned %v, want %v", again, err)
-	}
-}
-
-// TestConnCarriesAMessageLargerThanTheBuffer proves the buffer is a buffer and
-// not a limit.
-func TestConnCarriesAMessageLargerThanTheBuffer(t *testing.T) {
-	client, server := connPair(t)
-
-	want := bytes.Repeat([]byte{'x'}, defaultBufferSize*3)
-	go func() { _ = client.WriteMessage(BinaryMessage, want) }()
-
-	_ = server.SetReadDeadline(time.Now().Add(5 * time.Second))
-	kind, got, err := server.ReadMessage()
-	if err != nil {
-		t.Fatalf("reading = %v", err)
-	}
-	if kind != BinaryMessage || !bytes.Equal(got, want) {
-		t.Fatalf("read opcode %d of %d bytes, want %d of %d", kind, len(got), BinaryMessage, len(want))
-	}
-}
-
-// TestIsUnexpectedCloseSortsTheOrdinaryEndingsFromTheRest is the guard around
-// logging: on a server holding ten thousand sockets, 1000 and 1001 ARE the log.
-func TestIsUnexpectedCloseSortsTheOrdinaryEndingsFromTheRest(t *testing.T) {
-	expected := []int{CloseNormalClosure, CloseGoingAway}
-
-	if IsUnexpectedClose(&CloseError{Code: CloseNormalClosure}, expected...) {
-		t.Error("a normal closure was called unexpected")
-	}
-	if IsUnexpectedClose(&CloseError{Code: CloseGoingAway}, expected...) {
-		t.Error("a client navigating away was called unexpected")
-	}
-	if !IsUnexpectedClose(&CloseError{Code: CloseMessageTooBig}, expected...) {
-		t.Error("a message that was too big was not called unexpected")
-	}
-	if IsUnexpectedClose(errors.New("read tcp: connection reset by peer"), expected...) {
-		t.Error("a transport error was reported as a close code")
-	}
-}
-
-// TestCloseErrorSaysTheCodeAndTheReason keeps the message useful with and
-// without the peer's text, because most peers send none.
-func TestCloseErrorSaysTheCodeAndTheReason(t *testing.T) {
-	bare := (&CloseError{Code: CloseNormalClosure}).Error()
-	if bare == "" || bytes.Contains([]byte(bare), []byte(": :")) {
-		t.Fatalf("a close with no reason reads %q", bare)
-	}
-	if with := (&CloseError{Code: ClosePolicyViolation, Reason: "no"}).Error(); with == bare {
-		t.Fatal("the reason did not reach the message")
-	}
+	t.Fatal("should not get here")
 }

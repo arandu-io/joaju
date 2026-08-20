@@ -627,7 +627,7 @@ func (s *Server) read(r *http.Request, conn *Connection, socket *ws.Conn) {
 	for {
 		kind, message, err := socket.ReadMessage()
 		if err != nil {
-			if ws.IsUnexpectedClose(err, ws.CloseNormalClosure, ws.CloseGoingAway) {
+			if ws.IsUnexpectedCloseError(err, ws.CloseNormalClosure, ws.CloseGoingAway) {
 				s.log.InfoContext(ctx, "joaju: the socket ended",
 					slog.String("socket", string(conn.ID())), slog.Any("error", err))
 			}
@@ -1279,7 +1279,7 @@ func (k *sink) write() {
 			// on: the socket is closed either way by the deferred Close.
 			_ = k.conn.SetWriteDeadline(time.Now().Add(k.writeTimeout))
 			_ = k.conn.WriteMessage(ws.CloseMessage,
-				ws.FormatClose(ws.CloseNormalClosure, ""))
+				ws.FormatCloseMessage(ws.CloseNormalClosure, ""))
 			return
 		}
 	}
