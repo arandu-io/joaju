@@ -58,7 +58,11 @@ jobs:
             fi
             echo "::endgroup::"
           done < <(
+            # Paths with a component starting in _ or . are skipped, because
+            # the go tool does not build them: go test on such a directory
+            # fails with "no packages", which reads as a crasher and is not.
             grep -rl 'func Fuzz' --include='*_test.go' . |
+              grep -v -e '/_' -e '/\.' |
               while read -r f; do
                 d=$(dirname "$f")
                 grep -ho 'func Fuzz[A-Za-z0-9_]*' "$f" | sed "s|func |${d#./} |"
