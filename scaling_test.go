@@ -1275,6 +1275,58 @@ func TestAFleetAnswerNeverCrossesATenant(t *testing.T) {
 	}
 }
 
+func TestFleetAnswersNothingForAGrantThatCarriesNoTenant(t *testing.T) {
+	t.Parallel()
+
+	bus := newRelayTestBus()
+
+	orders := relayTestName(t, "acme", "presence-orders.17")
+	here := &relayTestChannel{name: orders, subscribers: []Subscriber{{Member: Member{UserID: "ana"}}}}
+	there := &relayTestChannel{name: orders, subscribers: []Subscriber{
+		{Member: Member{UserID: "bruno"}},
+		{Member: Member{UserID: "carla"}},
+	}}
+
+	first := newFleetTestInstance(t, "instance-one", bus, time.Second, here)
+	second := newFleetTestInstance(t, "instance-two", bus, time.Second, there)
+
+	first.hold(t, "acme", "ana")
+	second.hold(t, "acme", "bruno")
+	second.hold(t, "acme", "carla")
+
+	fleetTestListening(t, bus, "instance-one", 2)
+
+	// The tenant is the only filter a fleet answer has, and it comes off the
+	// Grant. A Grant with none is not a Grant for everybody: there is no tenant
+	// to compare an answer against, so nothing can be added without crossing a
+	// customer.
+	subject := auth.Subject{ID: "reader"}
+	nowhere, err := auth.Authorize(context.Background(), relayTestPolicy{}, subject, broadcasting.ChannelJoin, Subscription{})
+	if err != nil {
+		t.Fatalf("authorizing a subject with no tenant: %v", err)
+	}
+	if auth.Tenant(nowhere) != "" {
+		t.Fatalf("the grant carries the tenant %q, and this test needs one carrying none", auth.Tenant(nowhere))
+	}
+
+	whole := first.server.Fleet(context.Background(), nowhere, "")
+	if whole.Connections != 0 || len(whole.Channels) != 0 {
+		t.Fatalf("a grant with no tenant was answered %+v, want nothing", whole)
+	}
+
+	one := first.server.Fleet(context.Background(), nowhere, "presence-orders.17").Channel("presence-orders.17")
+	if one.Subscriptions != 0 || len(one.Members()) != 0 {
+		t.Fatalf("a grant with no tenant was answered %+v about one channel, want nothing", one)
+	}
+
+	// The same question with acme's tenant on it is answered, so what the two
+	// assertions above prove is the tenant and not a fleet that was silent.
+	held := relayTestGrant(t, "acme", broadcasting.ChannelJoin)
+	if got := first.server.Fleet(context.Background(), held, ""); got.Connections != 2 {
+		t.Fatalf("acme was answered %+v, want the two sockets the other instance holds", got)
+	}
+}
+
 func TestADegradedInstanceAnswersItsMetricsRoutesFromItsOwnState(t *testing.T) {
 	t.Parallel()
 
@@ -1336,7 +1388,7 @@ func TestAFleetAnswerAboutAnotherTenantIsRefusedByTheInstanceThatAsked(t *testin
 	}
 	defer func() { _ = relay.Close() }()
 
-	var tally fleetTally
+	var tally FleetTally
 
 	tally.add(relay.log, relay.ID(), "acme", fleetAnswer{
 		Origin:      "instance-two",
@@ -1348,7 +1400,7 @@ func TestAFleetAnswerAboutAnotherTenantIsRefusedByTheInstanceThatAsked(t *testin
 		},
 	})
 
-	if tally.connections != 0 || len(tally.channels) != 0 {
+	if tally.Connections != 0 || len(tally.Channels) != 0 {
 		t.Fatalf("an answer about globex was added to acme's numbers: %+v", tally)
 	}
 	if written := log.String(); !strings.Contains(written, "another tenant") {
@@ -1364,7 +1416,7 @@ func TestAFleetAnswerAboutAnotherTenantIsRefusedByTheInstanceThatAsked(t *testin
 		Connections: 4,
 	})
 
-	if tally.connections != 0 {
+	if tally.Connections != 0 {
 		t.Fatalf("this instance's own sockets were counted twice: %+v", tally)
 	}
 
@@ -1380,16 +1432,16 @@ func TestAFleetAnswerAboutAnotherTenantIsRefusedByTheInstanceThatAsked(t *testin
 		},
 	})
 
-	if tally.connections != 4 {
-		t.Fatalf("the fleet's sockets counted %d, want 4", tally.connections)
+	if tally.Connections != 4 {
+		t.Fatalf("the fleet's sockets counted %d, want 4", tally.Connections)
 	}
-	if got := tally.channel("presence-orders.17"); got.subscriptions != 2 {
-		t.Fatalf("the fleet's subscriptions counted %d, want 2", got.subscriptions)
+	if got := tally.Channel("presence-orders.17"); got.Subscriptions != 2 {
+		t.Fatalf("the fleet's subscriptions counted %d, want 2", got.Subscriptions)
 	}
-	if got := tally.channel("presence-orders.17").members(); len(got) != 1 || got[0] != "ana" {
+	if got := tally.Channel("presence-orders.17").Members(); len(got) != 1 || got[0] != "ana" {
 		t.Fatalf("the fleet's members are %v, want the one person named twice and no empty id", got)
 	}
-	if got := tally.channel("invoices.9"); got.subscriptions != 0 || got.users != nil {
+	if got := tally.Channel("invoices.9"); got.Subscriptions != 0 || got.Users != nil {
 		t.Fatalf("a channel nobody answered about is %+v, want nothing", got)
 	}
 }

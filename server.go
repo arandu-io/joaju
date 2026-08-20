@@ -894,7 +894,7 @@ func (s *Server) handleConnections(w http.ResponseWriter, r *http.Request) {
 
 	// Added and not reconciled: a socket is held by exactly one instance, so
 	// the fleet's count and this one's have nothing in common to double-count.
-	open += s.fleet(r.Context(), grant, "").connections
+	open += s.Fleet(r.Context(), grant, "").Connections
 
 	writeJSON(w, http.StatusOK, map[string]any{"connections": open})
 }
@@ -922,32 +922,32 @@ func (s *Server) handleChannels(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	elsewhere := s.fleet(r.Context(), grant, "")
+	elsewhere := s.Fleet(r.Context(), grant, "")
 
 	// The key is [ChannelName.Requested] and never [ChannelName.String]: the
 	// caller asked about its own channels and the tenant they are held under is
 	// not its to read back.
-	listed := make(map[string]any, len(channels)+len(elsewhere.channels))
+	listed := make(map[string]any, len(channels)+len(elsewhere.Channels))
 	for _, channel := range channels {
 		requested := channel.Name().Requested()
-		fleet := elsewhere.channel(requested)
-		entry := map[string]any{"occupied": len(channel.Connections())+fleet.subscriptions > 0}
+		fleet := elsewhere.Channel(requested)
+		entry := map[string]any{"occupied": len(channel.Connections())+fleet.Subscriptions > 0}
 		if channel.Name().Type().Presence() {
-			entry["user_count"] = countMembers(channel, fleet.users)
+			entry["user_count"] = countMembers(channel, fleet.Users)
 		}
 		listed[requested] = entry
 	}
 	// A channel every subscriber of which is on another instance is still a
 	// channel this tenant has, and leaving it out would make the list say a
 	// customer is talking on fewer channels than they are.
-	for requested, fleet := range elsewhere.channels {
+	for requested, fleet := range elsewhere.Channels {
 		if _, held := listed[requested]; held {
 			continue
 		}
 
-		entry := map[string]any{"occupied": fleet.subscriptions > 0}
+		entry := map[string]any{"occupied": fleet.Subscriptions > 0}
 		if fleetPresence(grant, requested) {
-			entry["user_count"] = len(fleet.users)
+			entry["user_count"] = len(fleet.Users)
 		}
 		listed[requested] = entry
 	}
@@ -963,17 +963,17 @@ func (s *Server) handleChannel(w http.ResponseWriter, r *http.Request) {
 	}
 
 	name := channel.Name()
-	fleet := s.fleet(r.Context(), grant, name.Requested()).channel(name.Requested())
+	fleet := s.Fleet(r.Context(), grant, name.Requested()).Channel(name.Requested())
 
 	// A subscription is one socket on one channel and one socket is on one
 	// instance, so these add. The member count below does not: see [fleetAnswer].
-	subscribers := len(channel.Connections()) + fleet.subscriptions
+	subscribers := len(channel.Connections()) + fleet.Subscriptions
 	body := map[string]any{
 		"occupied":           subscribers > 0,
 		"subscription_count": subscribers,
 	}
 	if name.Type().Presence() {
-		body["user_count"] = countMembers(channel, fleet.users)
+		body["user_count"] = countMembers(channel, fleet.Users)
 	}
 
 	writeJSON(w, http.StatusOK, body)
@@ -992,10 +992,10 @@ func (s *Server) handleChannelUsers(w http.ResponseWriter, r *http.Request) {
 	}
 
 	requested := channel.Name().Requested()
-	fleet := s.fleet(r.Context(), grant, requested).channel(requested)
+	fleet := s.Fleet(r.Context(), grant, requested).Channel(requested)
 
 	seen := make(map[string]bool)
-	users := make([]map[string]string, 0, len(channel.Connections())+len(fleet.users))
+	users := make([]map[string]string, 0, len(channel.Connections())+len(fleet.Users))
 	for _, subscriber := range channel.Connections() {
 		// One member may hold several sockets on one channel -- two tabs -- and
 		// the member list names people, not sockets.
@@ -1006,7 +1006,7 @@ func (s *Server) handleChannelUsers(w http.ResponseWriter, r *http.Request) {
 	}
 	// The two tabs may also be on two instances, which is the same person and
 	// the same reason: this is a union and never a concatenation.
-	for _, id := range fleet.members() {
+	for _, id := range fleet.Members() {
 		if !seen[id] {
 			seen[id] = true
 			users = append(users, map[string]string{"id": id})

@@ -250,44 +250,51 @@ type channelAnswer struct {
 	Users []string `json:"users,omitempty"`
 }
 
-// fleetTally is the other instances' answers added together, and is what the
-// four metrics routes add to their own numbers.
+// FleetTally is what the OTHER instances answered about one tenant, added
+// together. It is what [Server.Fleet] returns.
 //
-// It holds what the fleet said and never what this instance knows. The local
-// half of every route is answered from the Broker under the Grant the route was
-// authorized with, exactly as it was before there was a fleet, and the two are
-// added at the point the reply is built, so the local numbers keep coming from
-// a policy.
-type fleetTally struct {
-	// connections is how many sockets the other instances hold for the tenant.
-	connections int
-	// channels is one entry per channel the other instances hold, keyed by
+// It holds what they said and never what this instance knows. The local half of
+// a metrics route is answered from the Broker under the Grant the route was
+// authorized with, and the two are added at the point the reply is built, so
+// the local numbers keep coming from a policy.
+//
+// The zero value is the true answer for a deployment of one, for a server with
+// no relay, and for a relay that could not reach the bus.
+type FleetTally struct {
+	// Connections is how many sockets the other instances hold for the tenant.
+	Connections int
+	// Channels is one entry per channel the other instances hold, keyed by
 	// [ChannelName.Requested].
-	channels map[string]channelTally
+	Channels map[string]ChannelTally
 }
 
-// channelTally is the other instances' part of one channel.
-type channelTally struct {
-	// subscriptions is how many sockets they hold on it, summed.
-	subscriptions int
-	// users are the distinct [Member.UserID]s they hold on it.
-	users map[string]bool
+// ChannelTally is the other instances' part of one channel.
+type ChannelTally struct {
+	// Subscriptions is how many sockets they hold on it, summed. One socket is
+	// held by exactly one instance, so subscriptions add.
+	Subscriptions int
+	// Users are the distinct [Member.UserID]s they hold on it, as a set. It is
+	// a set and not a count because one person with a tab on two instances is
+	// counted by both and is one member, so the reply counts what is distinct
+	// rather than adding.
+	Users map[string]bool
 }
 
-// channel is what the fleet answered about one channel, or the zero value when
-// no other instance holds it.
-func (t fleetTally) channel(requested string) channelTally {
-	return t.channels[requested]
+// Channel is what the fleet answered about one channel, or the zero value when
+// no other instance holds it. The name is [ChannelName.Requested], with no
+// tenant in it.
+func (t FleetTally) Channel(requested string) ChannelTally {
+	return t.Channels[requested]
 }
 
-// members is the fleet's user ids on one channel, in one order.
+// Members is the fleet's user ids on one channel, in one order.
 //
-// Sorted for the reason [channel.Connections] is sorted: a member list that
+// Sorted for the reason [Channel.Connections] is sorted: a member list that
 // comes back in a different order on every request is a route nobody can diff,
 // and a map's order is not an order.
-func (t channelTally) members() []string {
-	ids := make([]string, 0, len(t.users))
-	for id := range t.users {
+func (t ChannelTally) Members() []string {
+	ids := make([]string, 0, len(t.Users))
+	for id := range t.Users {
 		ids = append(ids, id)
 	}
 	slices.Sort(ids)
@@ -304,7 +311,7 @@ func (t channelTally) members() []string {
 // asked refuses anything that came back about a different one. Neither of them
 // trusts the other, and a sum that crossed a tenant would need both to be
 // wrong.
-func (t *fleetTally) add(log *slog.Logger, mine InstanceID, tenant string, answer fleetAnswer) {
+func (t *FleetTally) add(log *slog.Logger, mine InstanceID, tenant string, answer fleetAnswer) {
 	if answer.Origin == mine {
 		// This instance's own numbers came off a Grant and are added by the
 		// route. Adding them again here would count every socket twice.
@@ -318,24 +325,24 @@ func (t *fleetTally) add(log *slog.Logger, mine InstanceID, tenant string, answe
 		return
 	}
 
-	t.connections += answer.Connections
+	t.Connections += answer.Connections
 	for requested, one := range answer.Channels {
-		if t.channels == nil {
-			t.channels = make(map[string]channelTally, len(answer.Channels))
+		if t.Channels == nil {
+			t.Channels = make(map[string]ChannelTally, len(answer.Channels))
 		}
 
-		held := t.channels[requested]
-		held.subscriptions += one.Subscriptions
+		held := t.Channels[requested]
+		held.Subscriptions += one.Subscriptions
 		for _, id := range one.Users {
 			if id == "" {
 				continue
 			}
-			if held.users == nil {
-				held.users = make(map[string]bool, len(one.Users))
+			if held.Users == nil {
+				held.Users = make(map[string]bool, len(one.Users))
 			}
-			held.users[id] = true
+			held.Users[id] = true
 		}
-		t.channels[requested] = held
+		t.Channels[requested] = held
 	}
 }
 
@@ -1146,8 +1153,8 @@ func (r *Relay) collect(payload string) {
 // and an instance that cannot reach it answers out of its own Broker rather
 // than spending the timeout finding that out again on every request -- which is
 // [Relay.Degraded] doing what it is for, and not a third state.
-func (r *Relay) ask(ctx context.Context, g auth.Grant, channel string) fleetTally {
-	var tally fleetTally
+func (r *Relay) ask(ctx context.Context, g auth.Grant, channel string) FleetTally {
+	var tally FleetTally
 
 	tenant := auth.Tenant(g)
 	if tenant == "" || r.bus == nil || r.Degraded() {
@@ -1458,18 +1465,28 @@ func (s *Server) tenantConnections(tenant string) int {
 	return s.perTenant[tenant]
 }
 
-// fleet is what the other instances hold, and is the second half of each of the
-// four metrics routes.
+// Fleet is what the OTHER instances hold for the Grant's tenant, and is the
+// second half of each of the four metrics routes.
 //
-// The first half is unchanged and still the whole of the answer on a deployment
-// of one: the route reads its own Broker and its own registry under the Grant
-// it was authorized with. This adds what the rest of the fleet answered, or
-// nothing at all when there is no relay, when the relay cannot reach the bus,
-// or when nobody answered in time. A route never fails because of it -- see
-// [Relay.ask], and [Relay.Publish] for the same decision on the way out.
-func (s *Server) fleet(ctx context.Context, g auth.Grant, channel string) fleetTally {
+// The first half is the caller's and still the whole of the answer on a
+// deployment of one: the route reads its own Broker and its own registry under
+// the Grant it was authorized with, and adds this to it. channel is
+// [ChannelName.Requested] of the one channel being asked about, and is empty to
+// ask about the whole tenant.
+//
+// The tenant is read off the Grant and is the only filter, because it is the
+// only one that did not arrive with the request. A Grant carrying no tenant
+// answers with the zero [FleetTally] rather than with everyone's numbers, and
+// an instance that answers about another tenant is dropped rather than added.
+//
+// It never fails and never blocks longer than [ServerConfig.MetricsTimeout]:
+// the zero value is what comes back from a server with no relay, from a relay
+// that cannot reach the bus, and from a fleet that did not answer in time. A
+// metrics route served late by one instance being replaced is a dashboard that
+// is down.
+func (s *Server) Fleet(ctx context.Context, g auth.Grant, channel string) FleetTally {
 	if s.relay == nil {
-		return fleetTally{}
+		return FleetTally{}
 	}
 
 	return s.relay.ask(ctx, g, channel)
