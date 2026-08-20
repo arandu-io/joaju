@@ -28,15 +28,15 @@ container image runs.
 
 ## What it delivers
 
-**One entry in the dependency graph, and the transport is why.** The root
-`go.mod` requires `github.com/arandu-io/hesape` and nothing else, and a CI step
-fails the build if it grows a second. Subpackage `ws` is this project's own
-RFC 6455 — not a fork, no borrowed code — because the surface this server uses
-is ten symbols, while a websocket library carries a client stack, proxy support
-and compression on top of them. It is measured and not asserted: Autobahn
-TestSuite version 18, every case except `12.*` and `13.*` — permessage-deflate,
-the same pair `laravel/reverb` excludes — **301 cases, 0 failures**. The report
-is [`ws/internal/autobahn/REPORT.txt`](ws/internal/autobahn/REPORT.txt).
+**Nothing in the dependency graph that is not ours or the standard library's.**
+The root `go.mod` requires `github.com/arandu-io/hesape` and
+`golang.org/x/net`, and a CI step fails the build on anything outside
+`arandu-io` and `golang.org/x`. Subpackage `ws` is this project's own RFC 6455 —
+not a fork, no borrowed code — and `golang.org/x/net` is what its client dials a
+SOCKS5 proxy with. It is measured and not asserted: Autobahn TestSuite version
+18, every case except `12.*` and `13.*` — permessage-deflate, the same pair
+`laravel/reverb` excludes — **301 cases, 0 failures**. The report is
+[`ws/internal/autobahn/REPORT.txt`](ws/internal/autobahn/REPORT.txt).
 
 **No path to a channel that a policy did not open.** The server authenticates
 nobody: it reads the subject the framework's middleware put on the request and
@@ -98,10 +98,11 @@ means and what leaving it out means.
   secret and a browser not at all, so a private or presence channel there is
   reached by offering the Pusher subscription signature, which the policy
   recomputes. A mounted server decides in its own policy and ignores it.
-- **No compression**, which is why `12.*` and `13.*` are excluded above; **no
-  TLS**, held by a reverse proxy in front; **one application per process**; and
-  no cross-origin socket, since the handshake's same-origin check has no setting
-  that widens it and an origin allowlist only narrows it further.
+- **No compression negotiated.** The transport implements permessage-deflate and
+  the server does not turn it on, which is why `12.*` and `13.*` are excluded
+  above. Also **no TLS**, held by a reverse proxy in front; **one application per
+  process**; and no cross-origin socket, since nothing here sets the handshake's
+  origin check and an origin allowlist only narrows it further.
 
 ## The rest of Arandu
 

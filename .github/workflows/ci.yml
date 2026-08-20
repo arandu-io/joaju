@@ -116,10 +116,10 @@ jobs:
             exit 1
           fi
 
-      # go.mod has one require line and it stays that way (ADR 0052). The ws
-      # subpackage exists so that the transport costs nothing in the graph, and
-      # a websocket library, a Redis client or a router imported for one
-      # convenience would undo that quietly.
+      # The graph is this project and the standard library's annex, and it stays
+      # that way. The ws subpackage exists so that the transport is ours rather
+      # than a library's, and a websocket library, a Redis client or a router
+      # imported for one convenience would undo that quietly.
       #
       # arandu-io is this project, and golang.org/x is the standard library's
       # own annex. Anything else fails.
