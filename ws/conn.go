@@ -987,12 +987,22 @@ func (c *Conn) advanceFrame() (int, error) {
 }
 
 func (c *Conn) handleProtocolError(message string) error {
-	data := FormatCloseMessage(CloseProtocolError, message)
-	if len(data) > maxControlFramePayloadSize {
-		data = data[:maxControlFramePayloadSize]
-	}
+	return c.handleCloseWithCode(CloseProtocolError, message)
+}
+
+// handleCloseWithCode tells the peer why the connection is being failed and
+// returns the error for the application.
+//
+// The code carries the reason section 7.4.1 has for it: 1002 for a frame that
+// broke the framing rules, 1007 for a text payload that was not UTF-8. A client
+// whose frames are refused with no code retries the same frames; one that is
+// told 1007 knows its encoder is broken.
+//
+// FormatCloseMessage fits the reason to the control frame, so there is no
+// second cut here.
+func (c *Conn) handleCloseWithCode(closeCode int, message string) error {
 	// Make a best effor to send a close message describing the problem.
-	_ = c.WriteControl(CloseMessage, data, time.Now().Add(writeWait))
+	_ = c.WriteControl(CloseMessage, FormatCloseMessage(closeCode, message), time.Now().Add(writeWait))
 	return errors.New("websocket: " + message)
 }
 
@@ -1232,6 +1242,16 @@ func (c *Conn) SetCompressionLevel(level int) error {
 
 // FormatCloseMessage formats closeCode and text as a WebSocket close message.
 // An empty message is returned for code CloseNoStatusReceived.
+//
+// A close frame is a control frame, so the result never exceeds 125 bytes. The
+// text is shortened to fit rather than refused: a close that WriteControl turns
+// away because its explanation was too long leaves the peer with no explanation
+// at all, which is worse than a short one.
+//
+// The cut lands on a rune boundary. A close reason is held to the same UTF-8
+// rule as a text message, so a cut inside a multi-byte rune turns an
+// explanation into a frame the peer must fail the connection over. The text
+// loses up to three further bytes; nothing else changes.
 func FormatCloseMessage(closeCode int, text string) []byte {
 	if closeCode == CloseNoStatusReceived {
 		// Return empty message because it's illegal to send
@@ -1239,8 +1259,30 @@ func FormatCloseMessage(closeCode int, text string) []byte {
 		// checks for nil.
 		return []byte{}
 	}
+	text = truncateToRune(text, maxControlFramePayloadSize-2)
 	buf := make([]byte, 2+len(text))
 	binary.BigEndian.PutUint16(buf, uint16(closeCode))
 	copy(buf[2:], text)
 	return buf
+}
+
+// truncateToRune shortens s to at most n bytes without splitting a rune.
+//
+// It is the one place that shortens a close reason. A second implementation of
+// the same cut is how one of them ends up splitting a rune the other does not.
+func truncateToRune(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	s = s[:n]
+	for len(s) > 0 {
+		// A RuneError one byte wide is the cut showing: the rune the text ends
+		// in is no longer there. One that is three bytes wide was in the text to
+		// begin with, and stays.
+		if r, size := utf8.DecodeLastRuneInString(s); r != utf8.RuneError || size > 1 {
+			break
+		}
+		s = s[:len(s)-1]
+	}
+	return s
 }

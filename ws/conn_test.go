@@ -7,15 +7,18 @@ package ws
 import (
 	"bufio"
 	"bytes"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"testing/iotest"
 	"time"
+	"unicode/utf8"
 )
 
 var _ net.Error = errWriteTimeout
@@ -743,4 +746,41 @@ func TestFailedConnectionReadPanic(t *testing.T) {
 		_, _, _ = c.ReadMessage()
 	}
 	t.Fatal("should not get here")
+}
+
+func TestFormatCloseMessageFitsControlFrame(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		text string
+	}{
+		{"ascii", strings.Repeat("e", 200)},
+		{"two byte runes", strings.Repeat("é", 90)},
+		{"four byte runes", strings.Repeat("\U0001f4a1", 40)},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			payload := FormatCloseMessage(CloseProtocolError, tt.text)
+			if len(payload) > maxControlFramePayloadSize {
+				t.Fatalf("a %d byte reason formatted to %d bytes, want at most %d",
+					len(tt.text), len(payload), maxControlFramePayloadSize)
+			}
+			if !utf8.Valid(payload[2:]) {
+				t.Fatalf("a %d byte reason was cut inside a rune", len(tt.text))
+			}
+			if !strings.HasPrefix(tt.text, string(payload[2:])) {
+				t.Fatalf("the reason came back as %q, which is not a prefix of what was given",
+					payload[2:])
+			}
+		})
+	}
+}
+
+func TestFormatCloseMessageKeepsShortReason(t *testing.T) {
+	const reason = "going away"
+	payload := FormatCloseMessage(CloseGoingAway, reason)
+	if string(payload[2:]) != reason {
+		t.Fatalf("the reason came back as %q, want %q", payload[2:], reason)
+	}
+	if code := binary.BigEndian.Uint16(payload); code != CloseGoingAway {
+		t.Fatalf("the code came back as %d, want %d", code, CloseGoingAway)
+	}
 }
