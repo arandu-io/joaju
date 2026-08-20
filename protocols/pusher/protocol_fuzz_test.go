@@ -1,4 +1,4 @@
-package joaju
+package pusher
 
 import (
 	"bytes"
@@ -10,6 +10,7 @@ import (
 
 	"github.com/arandu-io/hesape/auth"
 	"github.com/arandu-io/hesape/broadcasting"
+	"github.com/arandu-io/joaju"
 )
 
 // fuzzMaxMessages is how many frames one input may carry.
@@ -63,17 +64,17 @@ var fuzzRefusals = map[string]bool{
 }
 
 // fuzzConnection is one socket held by a subject of [fuzzTenant].
-func fuzzConnection(t testing.TB) (*Connection, *fuzzSink) {
+func fuzzConnection(t testing.TB) (*joaju.Connection, *fuzzSink) {
 	t.Helper()
 
 	g, err := auth.Authorize(context.Background(), channelTestConnectPolicy{},
-		auth.Subject{ID: "bruno", Tenant: fuzzTenant}, Connect, Handshake{Socket: "7.1"})
+		auth.Subject{ID: "bruno", Tenant: fuzzTenant}, joaju.Connect, joaju.Handshake{Socket: "7.1"})
 	if err != nil {
 		t.Fatalf("authorizing the handshake: %v", err)
 	}
 
 	sink := &fuzzSink{}
-	conn, err := NewConnection(g, "7.1", sink)
+	conn, err := joaju.NewConnection(g, "7.1", sink)
 	if err != nil {
 		t.Fatalf("opening the socket: %v", err)
 	}
@@ -86,14 +87,14 @@ func fuzzConnection(t testing.TB) (*Connection, *fuzzSink) {
 //
 // A frame that is read is matched, answered and recorded, so what the codec
 // accepts becomes state shared with every other socket in the process: a seat,
-// a channel in the [Broker], and a member list other subscribers read. The
+// a channel in the [joaju.Broker], and a member list other subscribers read. The
 // assertions are about what a client may cause and about what it is left with.
 // Nothing here may panic, everything written back has to be a frame a client can
 // read, no frame may name the tenant it was scoped to, no refusal may carry the
 // reason it was refused, and a socket that closed has to leave nothing behind.
 //
 // The input is one message per newline, which no frame can contain unescaped.
-// A permissive [SubscriptionPolicy] and [ClientEventsOn] are the widest
+// A permissive [joaju.SubscriptionPolicy] and [ClientEventsOn] are the widest
 // configuration this package offers, so the paths the checks below guard are all
 // reachable.
 func FuzzProtocolMessage(f *testing.F) {
@@ -149,7 +150,7 @@ func FuzzProtocolMessage(f *testing.F) {
 			if strings.Contains(frame.Channel, broadcasting.TenantSeparator) {
 				t.Fatalf("the server wrote channel %q, which names a tenant", frame.Channel)
 			}
-			if frame.Event != EventError {
+			if frame.Event != joaju.EventError {
 				continue
 			}
 

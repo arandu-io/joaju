@@ -149,7 +149,8 @@ var ErrConnectionLimit = errors.New("joaju: this tenant is holding as many conne
 //
 // It is not an auth.ErrForbidden. Nothing was refused on authority -- the name
 // is one no client of this protocol could be answered about, whoever asked for
-// it -- so it reaches the client as [ErrInvalidMessage] and not as a denial.
+// it -- so what reaches the client says the message was unreadable rather than
+// that it was denied.
 var ErrChannelName = errors.New("joaju: the channel name is not one this protocol carries")
 
 // ErrWrongTenant is what a [Broker] answers when the Grant it was handed and
@@ -562,8 +563,8 @@ type Event struct {
 	// user_id inside it says whatever that stranger wanted it to say.
 	//
 	// It is empty off a presence channel, because a channel that publishes
-	// nothing about who is listening has no member to name. The field is then
-	// absent from the frame rather than empty in it -- see [EventFrame].
+	// nothing about who is listening has no member to name. The frame a protocol
+	// builds from it then leaves the field out rather than sending it empty.
 	UserID string
 }
 

@@ -1,4 +1,4 @@
-package joaju_test
+package pusher_test
 
 import (
 	"encoding/json"
@@ -10,6 +10,7 @@ import (
 	"github.com/arandu-io/hesape/auth"
 	"github.com/arandu-io/hesape/broadcasting"
 	"github.com/arandu-io/joaju"
+	"github.com/arandu-io/joaju/protocols/pusher"
 )
 
 // tenant is the customer every channel in this file belongs to. It is a string
@@ -31,10 +32,10 @@ func channelName(t *testing.T, requested string) joaju.ChannelName {
 	return name
 }
 
-func encode(t *testing.T, f joaju.Frame) string {
+func encode(t *testing.T, f pusher.Frame) string {
 	t.Helper()
 
-	b, err := joaju.Encode(f)
+	b, err := pusher.Encode(f)
 	if err != nil {
 		t.Fatalf("Encode(%v) = %v", f, err)
 	}
@@ -43,7 +44,7 @@ func encode(t *testing.T, f joaju.Frame) string {
 }
 
 func TestEncodeWritesDataAsAStringContainingJSON(t *testing.T) {
-	f := joaju.Frame{
+	f := pusher.Frame{
 		Event:   "orders.updated",
 		Channel: "private-orders.17",
 		Data:    json.RawMessage(`{ "id" : 17 }`),
@@ -56,20 +57,20 @@ func TestEncodeWritesDataAsAStringContainingJSON(t *testing.T) {
 }
 
 func TestEncodeOmitsTheFieldsWithNoValue(t *testing.T) {
-	if got, want := encode(t, joaju.Pong()), `{"event":"pusher:pong"}`; got != want {
+	if got, want := encode(t, pusher.Pong()), `{"event":"pusher:pong"}`; got != want {
 		t.Errorf("Encode(Pong()) = %s, want %s", got, want)
 	}
 }
 
 func TestEncodeRefusesAFrameWithNoEventName(t *testing.T) {
-	if _, err := joaju.Encode(joaju.Frame{Channel: "orders"}); err == nil {
+	if _, err := pusher.Encode(pusher.Frame{Channel: "orders"}); err == nil {
 		t.Fatal("Encode() of a frame with no event name = nil, want an error")
 	}
 }
 
 func TestEncodeRefusesDataThatIsNotJSON(t *testing.T) {
-	f := joaju.Frame{Event: "orders.updated", Data: json.RawMessage(`{`)}
-	if _, err := joaju.Encode(f); err == nil {
+	f := pusher.Frame{Event: "orders.updated", Data: json.RawMessage(`{`)}
+	if _, err := pusher.Encode(f); err == nil {
 		t.Fatal("Encode() of a frame with broken data = nil, want an error")
 	}
 }
@@ -109,7 +110,7 @@ func TestDecodeReadsDataInEitherShape(t *testing.T) {
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			f, err := joaju.Decode([]byte(c.message))
+			f, err := pusher.Decode([]byte(c.message))
 			if err != nil {
 				t.Fatalf("Decode(%s) = %v", c.message, err)
 			}
@@ -129,8 +130,8 @@ func TestDecodeRefusesAMessageItCannotRead(t *testing.T) {
 
 	for name, message := range cases {
 		t.Run(name, func(t *testing.T) {
-			_, err := joaju.Decode([]byte(message))
-			if !errors.Is(err, joaju.ErrInvalidMessage) {
+			_, err := pusher.Decode([]byte(message))
+			if !errors.Is(err, pusher.ErrInvalidMessage) {
 				t.Fatalf("Decode(%s) = %v, want ErrInvalidMessage", message, err)
 			}
 		})
@@ -153,8 +154,8 @@ func TestDecodeRefusesAMessageThatIsNotUTF8(t *testing.T) {
 
 	for name, message := range cases {
 		t.Run(name, func(t *testing.T) {
-			_, err := joaju.Decode([]byte(message))
-			if !errors.Is(err, joaju.ErrInvalidMessage) {
+			_, err := pusher.Decode([]byte(message))
+			if !errors.Is(err, pusher.ErrInvalidMessage) {
 				t.Fatalf("Decode(%q) = %v, want ErrInvalidMessage", message, err)
 			}
 		})
@@ -171,22 +172,22 @@ func TestDecodeKeepsTwoChannelNamesApart(t *testing.T) {
 	one := "{\"event\":\"pusher:subscribe\",\"data\":{\"channel\":\"private-\xac\"}}"
 	other := "{\"event\":\"pusher:subscribe\",\"data\":{\"channel\":\"private-\xeb\"}}"
 
-	first, firstErr := joaju.Decode([]byte(one))
-	second, secondErr := joaju.Decode([]byte(other))
+	first, firstErr := pusher.Decode([]byte(one))
+	second, secondErr := pusher.Decode([]byte(other))
 	if firstErr == nil || secondErr == nil {
 		t.Fatalf("Decode() accepted %+v and %+v, and the two channels differ only in a byte neither is", first, second)
 	}
 }
 
 func TestFrameRoundTrips(t *testing.T) {
-	want := joaju.Frame{
+	want := pusher.Frame{
 		Event:   "client-typing",
 		Channel: "presence-room.1",
 		Data:    json.RawMessage(`{"at":1}`),
 		UserID:  "7",
 	}
 
-	got, err := joaju.Decode([]byte(encode(t, want)))
+	got, err := pusher.Decode([]byte(encode(t, want)))
 	if err != nil {
 		t.Fatalf("Decode() = %v", err)
 	}
@@ -199,7 +200,7 @@ func TestFrameRoundTrips(t *testing.T) {
 }
 
 func TestConnectionEstablishedCarriesTheSocketID(t *testing.T) {
-	got := encode(t, joaju.ConnectionEstablished("7.1", 30*time.Second))
+	got := encode(t, pusher.ConnectionEstablished("7.1", 30*time.Second))
 	want := `{"event":"pusher:connection_established","data":"{\"socket_id\":\"7.1\",\"activity_timeout\":30}"}`
 	if got != want {
 		t.Errorf("Encode(ConnectionEstablished()) = %s, want %s", got, want)
@@ -207,7 +208,7 @@ func TestConnectionEstablishedCarriesTheSocketID(t *testing.T) {
 }
 
 func TestConnectionEstablishedOmitsATimeoutItWasNotGiven(t *testing.T) {
-	got := encode(t, joaju.ConnectionEstablished("7.1", 0))
+	got := encode(t, pusher.ConnectionEstablished("7.1", 0))
 	want := `{"event":"pusher:connection_established","data":"{\"socket_id\":\"7.1\"}"}`
 	if got != want {
 		t.Errorf("Encode(ConnectionEstablished()) = %s, want %s", got, want)
@@ -215,14 +216,14 @@ func TestConnectionEstablishedOmitsATimeoutItWasNotGiven(t *testing.T) {
 }
 
 func TestConnectionEstablishedNeverAsksForATimeoutOfZeroSeconds(t *testing.T) {
-	f := joaju.ConnectionEstablished("7.1", 100*time.Millisecond)
+	f := pusher.ConnectionEstablished("7.1", 100*time.Millisecond)
 	if got := string(f.Data); !strings.Contains(got, `"activity_timeout":1`) {
 		t.Errorf("Data = %s, want an activity_timeout of 1", got)
 	}
 }
 
 func TestSubscriptionSucceededAlwaysCarriesAnObject(t *testing.T) {
-	f, err := joaju.SubscriptionSucceeded(channelName(t, "orders"), nil)
+	f, err := pusher.SubscriptionSucceeded(channelName(t, "orders"), nil)
 	if err != nil {
 		t.Fatalf("SubscriptionSucceeded() = %v", err)
 	}
@@ -237,7 +238,7 @@ func TestMemberAddedCarriesTheWholeMember(t *testing.T) {
 	name := channelName(t, "presence-room.1")
 	member := joaju.Member{UserID: "7", Info: json.RawMessage(`{"name":"Ana"}`)}
 
-	f, err := joaju.MemberAdded(name, member)
+	f, err := pusher.MemberAdded(name, member)
 	if err != nil {
 		t.Fatalf("MemberAdded() = %v", err)
 	}
@@ -252,7 +253,7 @@ func TestMemberRemovedCarriesOnlyTheUserID(t *testing.T) {
 	name := channelName(t, "presence-room.1")
 	member := joaju.Member{UserID: "7", Info: json.RawMessage(`{"name":"Ana"}`)}
 
-	f, err := joaju.MemberRemoved(name, member)
+	f, err := pusher.MemberRemoved(name, member)
 	if err != nil {
 		t.Fatalf("MemberRemoved() = %v", err)
 	}
@@ -264,7 +265,7 @@ func TestMemberRemovedCarriesOnlyTheUserID(t *testing.T) {
 }
 
 func TestCacheMissNamesTheChannelAndCarriesNothing(t *testing.T) {
-	f, err := joaju.CacheMiss(channelName(t, "cache-prices"))
+	f, err := pusher.CacheMiss(channelName(t, "cache-prices"))
 	if err != nil {
 		t.Fatalf("CacheMiss() = %v", err)
 	}
@@ -286,28 +287,28 @@ func TestNoFrameCarriesTheTenant(t *testing.T) {
 		t.Fatalf("String() = %s, want it to carry the tenant", name.String())
 	}
 
-	subscribed, err := joaju.SubscriptionSucceeded(name, map[string]any{"presence": map[string]any{"count": 1}})
+	subscribed, err := pusher.SubscriptionSucceeded(name, map[string]any{"presence": map[string]any{"count": 1}})
 	if err != nil {
 		t.Fatalf("SubscriptionSucceeded() = %v", err)
 	}
-	added, err := joaju.MemberAdded(name, joaju.Member{UserID: "7"})
+	added, err := pusher.MemberAdded(name, joaju.Member{UserID: "7"})
 	if err != nil {
 		t.Fatalf("MemberAdded() = %v", err)
 	}
-	removed, err := joaju.MemberRemoved(name, joaju.Member{UserID: "7"})
+	removed, err := pusher.MemberRemoved(name, joaju.Member{UserID: "7"})
 	if err != nil {
 		t.Fatalf("MemberRemoved() = %v", err)
 	}
-	missed, err := joaju.CacheMiss(name)
+	missed, err := pusher.CacheMiss(name)
 	if err != nil {
 		t.Fatalf("CacheMiss() = %v", err)
 	}
-	carried, err := joaju.EventFrame(joaju.Event{Name: "orders.updated", Channel: name, Data: json.RawMessage(`{"id":17}`)})
+	carried, err := pusher.EventFrame(joaju.Event{Name: "orders.updated", Channel: name, Data: json.RawMessage(`{"id":17}`)})
 	if err != nil {
 		t.Fatalf("EventFrame() = %v", err)
 	}
 
-	for _, f := range []joaju.Frame{subscribed, added, removed, missed, carried} {
+	for _, f := range []pusher.Frame{subscribed, added, removed, missed, carried} {
 		if f.Channel != name.Requested() {
 			t.Errorf("%s carried the channel %s, want %s", f.Event, f.Channel, name.Requested())
 		}
@@ -318,7 +319,7 @@ func TestNoFrameCarriesTheTenant(t *testing.T) {
 }
 
 func TestEventFrameRefusesAnEventWithNoChannel(t *testing.T) {
-	if _, err := joaju.EventFrame(joaju.Event{Name: "orders.updated"}); err == nil {
+	if _, err := pusher.EventFrame(joaju.Event{Name: "orders.updated"}); err == nil {
 		t.Fatal("EventFrame() with no channel = nil, want an error")
 	}
 }
@@ -332,7 +333,7 @@ func TestClientMaySendOnlyAClosedList(t *testing.T) {
 		"client-typing",
 	}
 	for _, event := range allowed {
-		if err := (joaju.Frame{Event: event}).ClientMaySend(); err != nil {
+		if err := (pusher.Frame{Event: event}).ClientMaySend(); err != nil {
 			t.Errorf("ClientMaySend(%s) = %v, want nil", event, err)
 		}
 	}
@@ -340,15 +341,15 @@ func TestClientMaySendOnlyAClosedList(t *testing.T) {
 	refused := []string{
 		joaju.EventConnectionEstablished,
 		joaju.EventError,
-		joaju.EventCacheMiss,
+		pusher.EventCacheMiss,
 		joaju.EventSubscriptionSucceeded,
 		joaju.EventMemberAdded,
 		joaju.EventMemberRemoved,
 		"orders.updated",
 	}
 	for _, event := range refused {
-		err := (joaju.Frame{Event: event}).ClientMaySend()
-		if !errors.Is(err, joaju.ErrInvalidMessage) {
+		err := (pusher.Frame{Event: event}).ClientMaySend()
+		if !errors.Is(err, pusher.ErrInvalidMessage) {
 			t.Errorf("ClientMaySend(%s) = %v, want ErrInvalidMessage", event, err)
 		}
 	}
@@ -357,7 +358,7 @@ func TestClientMaySendOnlyAClosedList(t *testing.T) {
 func TestSubscribeReadsWhatTheClientAskedFor(t *testing.T) {
 	message := `{"event":"pusher:subscribe","data":{"channel":"presence-room.1","auth":"key:signature","channel_data":"{\"user_id\":7,\"user_info\":{\"name\":\"Ana\"}}"}}`
 
-	f, err := joaju.Decode([]byte(message))
+	f, err := pusher.Decode([]byte(message))
 	if err != nil {
 		t.Fatalf("Decode() = %v", err)
 	}
@@ -385,7 +386,7 @@ func TestSubscribeReadsWhatTheClientAskedFor(t *testing.T) {
 }
 
 func TestSubscribeWithNoPresenceDataHasNoMember(t *testing.T) {
-	f, err := joaju.Decode([]byte(`{"event":"pusher:subscribe","data":{"channel":"orders"}}`))
+	f, err := pusher.Decode([]byte(`{"event":"pusher:subscribe","data":{"channel":"orders"}}`))
 	if err != nil {
 		t.Fatalf("Decode() = %v", err)
 	}
@@ -404,21 +405,21 @@ func TestSubscribeWithNoPresenceDataHasNoMember(t *testing.T) {
 }
 
 func TestSubscribeRefusesARequestWithNoChannel(t *testing.T) {
-	f := joaju.Frame{Event: joaju.EventSubscribe, Data: json.RawMessage(`{}`)}
-	if _, err := f.Subscribe(); !errors.Is(err, joaju.ErrInvalidMessage) {
+	f := pusher.Frame{Event: joaju.EventSubscribe, Data: json.RawMessage(`{}`)}
+	if _, err := f.Subscribe(); !errors.Is(err, pusher.ErrInvalidMessage) {
 		t.Fatalf("Subscribe() = %v, want ErrInvalidMessage", err)
 	}
 }
 
 func TestSubscribeRefusesAnotherEvent(t *testing.T) {
-	f := joaju.Frame{Event: joaju.EventUnsubscribe, Data: json.RawMessage(`{"channel":"orders"}`)}
-	if _, err := f.Subscribe(); !errors.Is(err, joaju.ErrInvalidMessage) {
+	f := pusher.Frame{Event: joaju.EventUnsubscribe, Data: json.RawMessage(`{"channel":"orders"}`)}
+	if _, err := f.Subscribe(); !errors.Is(err, pusher.ErrInvalidMessage) {
 		t.Fatalf("Subscribe() = %v, want ErrInvalidMessage", err)
 	}
 }
 
 func TestUnsubscribeReadsTheChannel(t *testing.T) {
-	f, err := joaju.Decode([]byte(`{"event":"pusher:unsubscribe","data":{"channel":"orders"}}`))
+	f, err := pusher.Decode([]byte(`{"event":"pusher:unsubscribe","data":{"channel":"orders"}}`))
 	if err != nil {
 		t.Fatalf("Decode() = %v", err)
 	}
@@ -433,54 +434,54 @@ func TestUnsubscribeReadsTheChannel(t *testing.T) {
 }
 
 func TestClientEventsAreOffInTheZeroValue(t *testing.T) {
-	var events joaju.ClientEvents
+	var events pusher.ClientEvents
 
-	f := joaju.Frame{Event: "client-typing", Channel: "private-room.1"}
+	f := pusher.Frame{Event: "client-typing", Channel: "private-room.1"}
 	_, err := events.Accept(f, channelName(t, "private-room.1"), "7.1", joaju.Member{}, true)
-	if !errors.Is(err, joaju.ErrClientEventsDisabled) {
+	if !errors.Is(err, pusher.ErrClientEventsDisabled) {
 		t.Fatalf("Accept() = %v, want ErrClientEventsDisabled", err)
 	}
 }
 
 func TestClientEventsRefuseAPublicChannel(t *testing.T) {
-	f := joaju.Frame{Event: "client-typing", Channel: "room.1"}
-	_, err := joaju.ClientEventsOn.Accept(f, channelName(t, "room.1"), "7.1", joaju.Member{}, true)
-	if !errors.Is(err, joaju.ErrClientEventChannel) {
+	f := pusher.Frame{Event: "client-typing", Channel: "room.1"}
+	_, err := pusher.ClientEventsOn.Accept(f, channelName(t, "room.1"), "7.1", joaju.Member{}, true)
+	if !errors.Is(err, pusher.ErrClientEventChannel) {
 		t.Fatalf("Accept() = %v, want ErrClientEventChannel", err)
 	}
 }
 
 func TestClientEventsRefuseSomebodyWhoIsNotOnTheChannel(t *testing.T) {
-	f := joaju.Frame{Event: "client-typing", Channel: "private-room.1"}
-	_, err := joaju.ClientEventsOn.Accept(f, channelName(t, "private-room.1"), "7.1", joaju.Member{}, false)
-	if !errors.Is(err, joaju.ErrNotSubscribed) {
+	f := pusher.Frame{Event: "client-typing", Channel: "private-room.1"}
+	_, err := pusher.ClientEventsOn.Accept(f, channelName(t, "private-room.1"), "7.1", joaju.Member{}, false)
+	if !errors.Is(err, pusher.ErrNotSubscribed) {
 		t.Fatalf("Accept() = %v, want ErrNotSubscribed", err)
 	}
 }
 
 func TestClientEventsRefuseAFrameThatIsNotOne(t *testing.T) {
-	f := joaju.Frame{Event: joaju.EventMemberAdded, Channel: "presence-room.1"}
-	_, err := joaju.ClientEventsOn.Accept(f, channelName(t, "presence-room.1"), "7.1", joaju.Member{}, true)
-	if !errors.Is(err, joaju.ErrInvalidMessage) {
+	f := pusher.Frame{Event: joaju.EventMemberAdded, Channel: "presence-room.1"}
+	_, err := pusher.ClientEventsOn.Accept(f, channelName(t, "presence-room.1"), "7.1", joaju.Member{}, true)
+	if !errors.Is(err, pusher.ErrInvalidMessage) {
 		t.Fatalf("Accept() = %v, want ErrInvalidMessage", err)
 	}
 }
 
 func TestClientEventsRefuseAChannelResolvedFromAnotherName(t *testing.T) {
-	f := joaju.Frame{Event: "client-typing", Channel: "private-room.1"}
-	_, err := joaju.ClientEventsOn.Accept(f, channelName(t, "private-room.2"), "7.1", joaju.Member{}, true)
-	if !errors.Is(err, joaju.ErrInvalidMessage) {
+	f := pusher.Frame{Event: "client-typing", Channel: "private-room.1"}
+	_, err := pusher.ClientEventsOn.Accept(f, channelName(t, "private-room.2"), "7.1", joaju.Member{}, true)
+	if !errors.Is(err, pusher.ErrInvalidMessage) {
 		t.Fatalf("Accept() = %v, want ErrInvalidMessage", err)
 	}
 }
 
 func TestClientEventsAcceptASubscriberOfAGuardedChannel(t *testing.T) {
 	name := channelName(t, "private-room.1")
-	f := joaju.Frame{Event: "client-typing", Channel: "private-room.1", Data: json.RawMessage(`{"at":1}`)}
+	f := pusher.Frame{Event: "client-typing", Channel: "private-room.1", Data: json.RawMessage(`{"at":1}`)}
 
 	// A private channel seats no member, so there is nobody to name and the
 	// relayed frame says so by leaving the field out.
-	e, err := joaju.ClientEventsOn.Accept(f, name, "7.1", joaju.Member{}, true)
+	e, err := pusher.ClientEventsOn.Accept(f, name, "7.1", joaju.Member{}, true)
 	if err != nil {
 		t.Fatalf("Accept() = %v", err)
 	}
@@ -500,7 +501,7 @@ func TestClientEventsAcceptASubscriberOfAGuardedChannel(t *testing.T) {
 		t.Errorf("UserID = %s, want none: a private channel has no member to name", e.UserID)
 	}
 
-	relayed, err := joaju.EventFrame(e)
+	relayed, err := pusher.EventFrame(e)
 	if err != nil {
 		t.Fatalf("EventFrame() = %v", err)
 	}
@@ -516,14 +517,14 @@ func TestClientEventsAcceptASubscriberOfAGuardedChannel(t *testing.T) {
 // makes "somebody is typing" name a person rather than a stranger's byte.
 func TestClientEventsCarryTheSeatedMemberAndNotTheUserIDTheFrameClaims(t *testing.T) {
 	name := channelName(t, "presence-room.1")
-	f := joaju.Frame{
+	f := pusher.Frame{
 		Event:   "client-typing",
 		Channel: "presence-room.1",
 		Data:    json.RawMessage(`{"at":1}`),
 		UserID:  "somebody-else",
 	}
 
-	e, err := joaju.ClientEventsOn.Accept(f, name, "7.1", joaju.Member{UserID: "7", Info: json.RawMessage(`{"name":"Ana"}`)}, true)
+	e, err := pusher.ClientEventsOn.Accept(f, name, "7.1", joaju.Member{UserID: "7", Info: json.RawMessage(`{"name":"Ana"}`)}, true)
 	if err != nil {
 		t.Fatalf("Accept() = %v", err)
 	}
@@ -531,7 +532,7 @@ func TestClientEventsCarryTheSeatedMemberAndNotTheUserIDTheFrameClaims(t *testin
 		t.Fatalf("UserID = %s, want 7 -- the member the channel seated, not the one the frame named", e.UserID)
 	}
 
-	relayed, err := joaju.EventFrame(e)
+	relayed, err := pusher.EventFrame(e)
 	if err != nil {
 		t.Fatalf("EventFrame() = %v", err)
 	}
@@ -548,7 +549,7 @@ func TestClientEventsCarryTheSeatedMemberAndNotTheUserIDTheFrameClaims(t *testin
 func TestErrorFrameKeepsTheCodeAndDropsTheCause(t *testing.T) {
 	err := errors.New("channel private-orders.17 denied for subject u_31: not the owner")
 
-	got := encode(t, joaju.ErrorFrame(err))
+	got := encode(t, pusher.ErrorFrame(err))
 	want := `{"event":"pusher:error","data":"{\"code\":4200,\"message\":\"Invalid message format\"}"}`
 	if got != want {
 		t.Errorf("ErrorFrame() = %s, want %s", got, want)
@@ -567,23 +568,23 @@ func TestErrorFrameMapsARefusedGrantToUnauthorized(t *testing.T) {
 		t.Fatal("the zero Grant allowed Connect")
 	}
 
-	f := joaju.ErrorFrame(err)
+	f := pusher.ErrorFrame(err)
 	if got, want := string(f.Data), `{"code":4009,"message":"Connection is unauthorized"}`; got != want {
 		t.Errorf("ErrorFrame() data = %s, want %s", got, want)
 	}
 }
 
 func TestErrorFrameKeepsAProtocolErrorFoundAtAnyDepth(t *testing.T) {
-	_, err := joaju.Decode([]byte(`{`))
+	_, err := pusher.Decode([]byte(`{`))
 
-	f := joaju.ErrorFrame(err)
+	f := pusher.ErrorFrame(err)
 	if got, want := string(f.Data), `{"code":4200,"message":"Invalid message format"}`; got != want {
 		t.Errorf("ErrorFrame() data = %s, want %s", got, want)
 	}
 }
 
 func TestProtocolErrorFrameIsTheOneThePusherClientsRead(t *testing.T) {
-	got := encode(t, joaju.ErrOverQuota.Frame())
+	got := encode(t, pusher.ErrOverQuota.Frame())
 	want := `{"event":"pusher:error","data":"{\"code\":4004,\"message\":\"Application is over connection quota\"}"}`
 	if got != want {
 		t.Errorf("Frame() = %s, want %s", got, want)

@@ -224,8 +224,8 @@ type ServerConfig struct {
 	// a limit that refuses the frames of a correct client is worse than no limit
 	// at all. It is turned on by a deployment that measured its own traffic.
 	//
-	// A frame past the limit is answered with [ErrRateLimited] and dropped, and
-	// the socket stays open. There is no second setting that closes it instead:
+	// A frame past the limit is answered with [RefusalRateLimited] and dropped,
+	// and the socket stays open. There is no second setting that closes it:
 	// two ways to answer one refusal is two behaviours to explain, and
 	// the client that a limit is aimed at is the one worth keeping addressable.
 	MaxMessagesPerSecond int

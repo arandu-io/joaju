@@ -1,4 +1,4 @@
-package joaju
+package pusher
 
 import (
 	"bytes"
@@ -10,6 +10,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/arandu-io/hesape/auth"
+	"github.com/arandu-io/joaju"
 )
 
 // EventCacheMiss tells a subscriber of a cache channel that there is nothing to
@@ -18,19 +19,19 @@ import (
 // It is the one protocol event name [joaju] does not already declare, because
 // it belongs to the cache channels and those exist only here, in the wire
 // format.
-const EventCacheMiss = ProtocolPrefix + "cache_miss"
+const EventCacheMiss = joaju.ProtocolPrefix + "cache_miss"
 
 // ClientEventPrefix is the namespace of an event a client published rather than
 // received: "client-".
 //
 // It is the third reserved prefix and the only one that travels inwards.
-// [ProtocolPrefix] and [InternalPrefix] name what the server says; this one
+// [joaju.ProtocolPrefix] and [joaju.InternalPrefix] name what the server says; this one
 // names what a browser says to every other browser on the channel, which is why
 // [ClientEvents] exists and why it is off in its zero value.
 const ClientEventPrefix = "client-"
 
 // ErrorCode is a code from Pusher's error table, sent in the data of
-// [EventError].
+// [joaju.EventError].
 //
 // The number is the contract, not the message: an existing client branches on
 // the code and only prints the text. The ranges are Pusher's, and a client
@@ -78,7 +79,7 @@ func (e ProtocolError) Error() string {
 	return fmt.Sprintf("joaju: pusher error %d: %s", e.Code, e.Message)
 }
 
-// Frame is the [EventError] frame that carries this refusal to the client.
+// Frame is the [joaju.EventError] frame that carries this refusal to the client.
 func (e ProtocolError) Frame() Frame {
 	// A struct of an int and a string has no encoding that can fail.
 	data, _ := json.Marshal(struct {
@@ -86,7 +87,7 @@ func (e ProtocolError) Frame() Frame {
 		Message string    `json:"message"`
 	}{Code: e.Code, Message: e.Message})
 
-	return Frame{Event: EventError, Data: data}
+	return Frame{Event: joaju.EventError, Data: data}
 }
 
 // The refusals this package sends, with the wording the protocol's clients
@@ -96,16 +97,16 @@ var (
 	// answers a new socket.
 	ErrOverQuota = ProtocolError{Code: CodeOverQuota, Message: "Application is over connection quota"}
 	// ErrUnauthorized is 4009, and is what every refusal from a
-	// [ConnectPolicy] or a [SubscriptionPolicy] becomes on the wire.
+	// [joaju.ConnectPolicy] or a [joaju.SubscriptionPolicy] becomes on the wire.
 	ErrUnauthorized = ProtocolError{Code: CodeUnauthorized, Message: "Connection is unauthorized"}
 	// ErrOriginNotAllowed is 4009: the Origin the browser sent is one a
-	// [ConnectPolicy] refused. See [Handshake].
+	// [joaju.ConnectPolicy] refused. See [joaju.Handshake].
 	ErrOriginNotAllowed = ProtocolError{Code: CodeUnauthorized, Message: "Origin not allowed"}
 	// ErrNotSubscribed is 4009: a client tried to publish on a channel it is
 	// not on.
 	ErrNotSubscribed = ProtocolError{Code: CodeUnauthorized, Message: "The client is not a member of the specified channel."}
 	// ErrClientEventChannel is 4009: client events exist only on the channels a
-	// [SubscriptionPolicy] guarded. See [ClientEvents].
+	// [joaju.SubscriptionPolicy] guarded. See [ClientEvents].
 	ErrClientEventChannel = ProtocolError{Code: CodeUnauthorized, Message: "Client event rejected - only supported on private and presence channels"}
 	// ErrInvalidMessage is 4200, and is what anything unreadable becomes. It is
 	// also the answer to an unknown event name.
@@ -129,7 +130,7 @@ var (
 // action and the resource -- to the browser that was refused.
 //
 // A [ProtocolError] keeps its own code. An auth.ErrForbidden from any depth,
-// which is what a [ConnectPolicy] or a [SubscriptionPolicy] produces, becomes
+// which is what a [joaju.ConnectPolicy] or a [joaju.SubscriptionPolicy] produces, becomes
 // [ErrUnauthorized]. Everything else becomes [ErrInvalidMessage], and its text
 // is dropped. The caller logs err.
 func ErrorFrame(err error) Frame {
@@ -156,23 +157,23 @@ func ErrorFrame(err error) Frame {
 // read. [Frame.Data] holds the inner value decoded, and the encoding happens
 // once, here, so that no caller has to remember which side of it they are on.
 //
-// The frame's Channel is a plain string and not a [ChannelName], because that
+// The frame's Channel is a plain string and not a [joaju.ChannelName], because that
 // is what the field is: on the way in it is what the client asked for, and on
-// the way out it is [ChannelName.Requested]. The constructors below do the
+// the way out it is [joaju.ChannelName.Requested]. The constructors below do the
 // conversion, and they are the reason no code path can write
-// [ChannelName.String] -- with the tenant in front of it -- into a frame.
+// [joaju.ChannelName.String] -- with the tenant in front of it -- into a frame.
 //
 // The zero value is not a frame: encoding one without an event name fails
 // rather than emitting {}.
 type Frame struct {
-	// Event is the event name, and is required. It is one of the [ProtocolPrefix]
-	// names, one of the [InternalPrefix] names, an application event, or a
+	// Event is the event name, and is required. It is one of the [joaju.ProtocolPrefix]
+	// names, one of the [joaju.InternalPrefix] names, an application event, or a
 	// [ClientEventPrefix] one.
 	Event string
 	// Channel is the channel the frame is about, with no tenant in it. It is
 	// absent on the frames that are about the socket rather than a channel:
-	// [EventConnectionEstablished], [EventPing], [EventPong] and most
-	// [EventError] frames.
+	// [joaju.EventConnectionEstablished], [joaju.EventPing], [joaju.EventPong] and most
+	// [joaju.EventError] frames.
 	Channel string
 	// Data is the payload, decoded. It is encoded as a JSON string on the way
 	// out and decoded from one on the way in.
@@ -307,11 +308,11 @@ func Decode(message []byte) (Frame, error) {
 
 // IsProtocol reports whether this is one of the protocol's own events, the
 // "pusher:" ones.
-func (f Frame) IsProtocol() bool { return strings.HasPrefix(f.Event, ProtocolPrefix) }
+func (f Frame) IsProtocol() bool { return strings.HasPrefix(f.Event, joaju.ProtocolPrefix) }
 
 // IsInternal reports whether this is one of the events only the server may
 // send, the "pusher_internal:" ones.
-func (f Frame) IsInternal() bool { return strings.HasPrefix(f.Event, InternalPrefix) }
+func (f Frame) IsInternal() bool { return strings.HasPrefix(f.Event, joaju.InternalPrefix) }
 
 // IsClientEvent reports whether a client published this, rather than the
 // server. See [ClientEvents].
@@ -337,7 +338,7 @@ func (f Frame) ClientMaySend() error {
 	}
 
 	switch f.Event {
-	case EventSubscribe, EventUnsubscribe, EventPing, EventPong:
+	case joaju.EventSubscribe, joaju.EventUnsubscribe, joaju.EventPing, joaju.EventPong:
 		return nil
 	}
 
@@ -352,10 +353,10 @@ func (f Frame) ClientMaySend() error {
 // under a second is sent as one: zero would tell the client to ping
 // immediately. A zero or negative duration omits the field, and the client
 // falls back to its own default.
-func ConnectionEstablished(id SocketID, activityTimeout time.Duration) Frame {
+func ConnectionEstablished(id joaju.SocketID, activityTimeout time.Duration) Frame {
 	payload := struct {
-		SocketID        SocketID `json:"socket_id"`
-		ActivityTimeout int      `json:"activity_timeout,omitempty"`
+		SocketID        joaju.SocketID `json:"socket_id"`
+		ActivityTimeout int            `json:"activity_timeout,omitempty"`
 	}{SocketID: id}
 
 	if activityTimeout > 0 {
@@ -368,22 +369,22 @@ func ConnectionEstablished(id SocketID, activityTimeout time.Duration) Frame {
 	// A string and an int have no encoding that can fail.
 	data, _ := json.Marshal(payload)
 
-	return Frame{Event: EventConnectionEstablished, Data: data}
+	return Frame{Event: joaju.EventConnectionEstablished, Data: data}
 }
 
 // Ping is the server asking a silent socket whether it is still there.
-func Ping() Frame { return Frame{Event: EventPing} }
+func Ping() Frame { return Frame{Event: joaju.EventPing} }
 
-// Pong answers a client's [EventPing]. It carries no data, which is the frame
+// Pong answers a client's [joaju.EventPing]. It carries no data, which is the frame
 // Pusher's clients expect: {"event":"pusher:pong"}.
-func Pong() Frame { return Frame{Event: EventPong} }
+func Pong() Frame { return Frame{Event: joaju.EventPong} }
 
-// SubscriptionSucceeded confirms a subscription and carries [Channel.Data].
+// SubscriptionSucceeded confirms a subscription and carries [joaju.Channel.Data].
 //
 // data is empty on every kind of channel but a presence one, and it still goes
 // out as an object: an internal frame always carries {} rather than no data
 // field, because a client that finds the field missing has nothing to parse.
-func SubscriptionSucceeded(name ChannelName, data map[string]any) (Frame, error) {
+func SubscriptionSucceeded(name joaju.ChannelName, data map[string]any) (Frame, error) {
 	if name.IsZero() {
 		return Frame{}, errors.New("joaju: a subscription confirmation needs a channel")
 	}
@@ -396,12 +397,12 @@ func SubscriptionSucceeded(name ChannelName, data map[string]any) (Frame, error)
 		return Frame{}, fmt.Errorf("joaju: the data of %s could not be encoded: %w", name.Requested(), err)
 	}
 
-	return Frame{Event: EventSubscriptionSucceeded, Channel: name.Requested(), Data: encoded}, nil
+	return Frame{Event: joaju.EventSubscriptionSucceeded, Channel: name.Requested(), Data: encoded}, nil
 }
 
 // MemberAdded tells the rest of a presence channel that somebody joined. It
-// carries the whole [Member], which is user_id and user_info.
-func MemberAdded(name ChannelName, m Member) (Frame, error) {
+// carries the whole [joaju.Member], which is user_id and user_info.
+func MemberAdded(name joaju.ChannelName, m joaju.Member) (Frame, error) {
 	if name.IsZero() {
 		return Frame{}, errors.New("joaju: a member announcement needs a channel")
 	}
@@ -411,15 +412,15 @@ func MemberAdded(name ChannelName, m Member) (Frame, error) {
 		return Frame{}, fmt.Errorf("joaju: the member of %s could not be encoded: %w", name.Requested(), err)
 	}
 
-	return Frame{Event: EventMemberAdded, Channel: name.Requested(), Data: encoded}, nil
+	return Frame{Event: joaju.EventMemberAdded, Channel: name.Requested(), Data: encoded}, nil
 }
 
 // MemberRemoved tells the rest of a presence channel that somebody left.
 //
-// It carries the user_id alone, and not [Member.Info]: the departure identifies
+// It carries the user_id alone, and not [joaju.Member.Info]: the departure identifies
 // a member the others already have, and sending their information again on the
 // way out would put a copy of it in a frame that nobody reads it from.
-func MemberRemoved(name ChannelName, m Member) (Frame, error) {
+func MemberRemoved(name joaju.ChannelName, m joaju.Member) (Frame, error) {
 	if name.IsZero() {
 		return Frame{}, errors.New("joaju: a member announcement needs a channel")
 	}
@@ -429,12 +430,12 @@ func MemberRemoved(name ChannelName, m Member) (Frame, error) {
 		UserID string `json:"user_id"`
 	}{UserID: m.UserID})
 
-	return Frame{Event: EventMemberRemoved, Channel: name.Requested(), Data: data}, nil
+	return Frame{Event: joaju.EventMemberRemoved, Channel: name.Requested(), Data: data}, nil
 }
 
 // CacheMiss tells a new subscriber of a cache channel that there is nothing to
 // replay, so it stops waiting for an event that is not coming.
-func CacheMiss(name ChannelName) (Frame, error) {
+func CacheMiss(name joaju.ChannelName) (Frame, error) {
 	if name.IsZero() {
 		return Frame{}, errors.New("joaju: a cache miss needs a channel")
 	}
@@ -442,25 +443,25 @@ func CacheMiss(name ChannelName) (Frame, error) {
 	return Frame{Event: EventCacheMiss, Channel: name.Requested()}, nil
 }
 
-// EventFrame is the frame that carries an [Event] to a subscriber.
+// EventFrame is the frame that carries an [joaju.Event] to a subscriber.
 //
-// It is the one place [Event] becomes bytes, and it is where the channel loses
-// its tenant: [ChannelName.Requested] goes out, [ChannelName.String] never
+// It is the one place [joaju.Event] becomes bytes, and it is where the channel loses
+// its tenant: [joaju.ChannelName.Requested] goes out, [joaju.ChannelName.String] never
 // does. The client asked for "private-orders.17" and is answered about
 // "private-orders.17"; that it was "acme:private-orders.17" here is not its to
 // see, and a frame naming the tenant would tell every subscriber the name of
 // the namespace their neighbours are in.
 //
-// [Event.Socket] is not in the frame. It says who not to send this to, which is
+// [joaju.Event.Socket] is not in the frame. It says who not to send this to, which is
 // the sender's business and the channel's, and it is answered before this is
 // called.
 //
-// [Event.UserID] is, and only when there is one. It is set on a client event
+// [joaju.Event.UserID] is, and only when there is one. It is set on a client event
 // relayed from a presence channel and on nothing else, and [Frame.MarshalJSON]
 // leaves the field out when it is empty -- so a private channel's frames keep
 // the shape they had. A user_id of "" is a key a client validating a schema has
 // to be taught to expect, in exchange for a value that never names anybody.
-func EventFrame(e Event) (Frame, error) {
+func EventFrame(e joaju.Event) (Frame, error) {
 	if e.Name == "" {
 		return Frame{}, errors.New("joaju: an event with no name cannot be sent")
 	}
@@ -471,17 +472,17 @@ func EventFrame(e Event) (Frame, error) {
 	return Frame{Event: e.Name, Channel: e.Channel.Requested(), Data: e.Data, UserID: e.UserID}, nil
 }
 
-// SubscribeRequest is the data of a [EventSubscribe] frame: what a client asked
+// SubscribeRequest is the data of a [joaju.EventSubscribe] frame: what a client asked
 // to listen to, and what it offered in support.
 type SubscribeRequest struct {
 	// Channel is the name the client asked for, exactly as it sent it and with
-	// no tenant in it. The caller turns it into a [ChannelName] with
-	// [NewChannelName], which is where the tenant comes from the Grant.
+	// no tenant in it. The caller turns it into a [joaju.ChannelName] with
+	// [joaju.NewChannelName], which is where the tenant comes from the Grant.
 	Channel string `json:"channel"`
 
 	// Auth is the client's Pusher authentication signature, and this package
-	// does not verify it. It is carried to [Subscription.Auth], where a
-	// [SubscriptionPolicy] may.
+	// does not verify it. It is carried to [joaju.Subscription.Auth], where a
+	// [joaju.SubscriptionPolicy] may.
 	//
 	// In the Pusher protocol this string is the whole authorization: the
 	// application signs "socket_id:channel" with the shared secret over a
@@ -498,23 +499,23 @@ type SubscribeRequest struct {
 	// it refused before. In a process that authenticates nobody there is no
 	// first mechanism for it to be a second one to, and there it is the only
 	// evidence about a browser there is -- which is why cmd/joaju could serve
-	// no private or presence channel while [Subscription] had no field for it.
+	// no private or presence channel while [joaju.Subscription] had no field for it.
 	Auth string `json:"auth,omitempty"`
 
 	// ChannelData is the presence information the client offered, and it is a
-	// claim rather than a fact -- see [Subscription.Member]. Read it with
+	// claim rather than a fact -- see [joaju.Subscription.Member]. Read it with
 	// [SubscribeRequest.Member].
 	//
-	// It reaches a policy undecoded as well, as [Subscription.ChannelData],
+	// It reaches a policy undecoded as well, as [joaju.Subscription.ChannelData],
 	// because it is the third part of what [SubscribeRequest.Auth] was computed
 	// over and re-encoding it would change the bytes and so the hash.
 	ChannelData json.RawMessage `json:"channel_data,omitempty"`
 }
 
-// Subscribe decodes the data of a [EventSubscribe] frame.
+// Subscribe decodes the data of a [joaju.EventSubscribe] frame.
 func (f Frame) Subscribe() (SubscribeRequest, error) {
-	if f.Event != EventSubscribe {
-		return SubscribeRequest{}, fmt.Errorf("%w: %s is not %s", ErrInvalidMessage, f.Event, EventSubscribe)
+	if f.Event != joaju.EventSubscribe {
+		return SubscribeRequest{}, fmt.Errorf("%w: %s is not %s", ErrInvalidMessage, f.Event, joaju.EventSubscribe)
 	}
 
 	var r SubscribeRequest
@@ -533,12 +534,12 @@ func (f Frame) Subscribe() (SubscribeRequest, error) {
 	return r, nil
 }
 
-// Unsubscribe decodes the data of a [EventUnsubscribe] frame, and is the
+// Unsubscribe decodes the data of a [joaju.EventUnsubscribe] frame, and is the
 // channel name the client asked to leave -- raw, with no tenant in it, like
 // [SubscribeRequest.Channel].
 func (f Frame) Unsubscribe() (string, error) {
-	if f.Event != EventUnsubscribe {
-		return "", fmt.Errorf("%w: %s is not %s", ErrInvalidMessage, f.Event, EventUnsubscribe)
+	if f.Event != joaju.EventUnsubscribe {
+		return "", fmt.Errorf("%w: %s is not %s", ErrInvalidMessage, f.Event, joaju.EventUnsubscribe)
 	}
 
 	var r struct {
@@ -556,7 +557,7 @@ func (f Frame) Unsubscribe() (string, error) {
 	return r.Channel, nil
 }
 
-// Member reads the presence data the client offered, and is the zero [Member]
+// Member reads the presence data the client offered, and is the zero [joaju.Member]
 // when it offered none.
 //
 // It accepts a user_id that arrived as a number as well as one that arrived as
@@ -564,12 +565,12 @@ func (f Frame) Unsubscribe() (string, error) {
 // rather than parsed and reprinted, so 007 stays 007.
 //
 // What it returns is a claim. A client sends its own channel_data, so the
-// user_id in it is the one the client typed: a [SubscriptionPolicy] compares it
+// user_id in it is the one the client typed: a [joaju.SubscriptionPolicy] compares it
 // against the subject on the Grant, and one that does not is a policy that lets
 // a subscriber join a presence channel as somebody else.
-func (r SubscribeRequest) Member() (Member, error) {
+func (r SubscribeRequest) Member() (joaju.Member, error) {
 	if len(r.ChannelData) == 0 {
-		return Member{}, nil
+		return joaju.Member{}, nil
 	}
 
 	var wire struct {
@@ -577,15 +578,15 @@ func (r SubscribeRequest) Member() (Member, error) {
 		Info   json.RawMessage `json:"user_info"`
 	}
 	if err := json.Unmarshal(r.ChannelData, &wire); err != nil {
-		return Member{}, fmt.Errorf("%w: %v", ErrInvalidMessage, err)
+		return joaju.Member{}, fmt.Errorf("%w: %v", ErrInvalidMessage, err)
 	}
 
 	id, err := memberID(wire.UserID)
 	if err != nil {
-		return Member{}, err
+		return joaju.Member{}, err
 	}
 
-	return Member{UserID: id, Info: unwrapJSONString(wire.Info)}, nil
+	return joaju.Member{UserID: id, Info: unwrapJSONString(wire.Info)}, nil
 }
 
 // memberID reads a user_id that may have been written as a string or as a
@@ -621,7 +622,7 @@ func memberID(raw json.RawMessage) (string, error) {
 //   - the payload is the sender's, so whatever the receivers render from it is
 //     rendered from a stranger's bytes;
 //   - the sender is a browser, so its identity is whatever a
-//     [SubscriptionPolicy] settled at subscription time and nothing more;
+//     [joaju.SubscriptionPolicy] settled at subscription time and nothing more;
 //   - nothing on the server sees the message go past, so there is no audit
 //     trail, no validation and no rate limit that is not built here.
 //
@@ -638,15 +639,15 @@ func memberID(raw json.RawMessage) (string, error) {
 // the third of which is the authorization:
 //
 //   - the sender would not have to be on the channel. There is no frame a
-//     client can send that reaches a [Channel] it did not subscribe to: the
+//     client can send that reaches a [joaju.Channel] it did not subscribe to: the
 //     caller of Accept is handed the seat the socket already holds, and nothing
-//     on that path asks a [Broker] for a channel. Adding the lookup would be a
-//     socket publishing into a private channel no [SubscriptionPolicy] ever
+//     on that path asks a [joaju.Broker] for a channel. Adding the lookup would be a
+//     socket publishing into a private channel no [joaju.SubscriptionPolicy] ever
 //     saw, which is the leak this repository exists not to have;
 //   - the relayed payload would be the sender's frame verbatim -- every extra
 //     top-level key it carried included, a user_id the sender wrote for itself
 //     among them. Here a relayed frame is built field by field out of an
-//     [Event], and there is no verbatim path for a setting to pick;
+//     [joaju.Event], and there is no verbatim path for a setting to pick;
 //   - no user_id would be stamped. Here it comes off the channel's record of
 //     the seat, so the only way not to have one is not to have a seat, which is
 //     the first point again.
@@ -667,20 +668,20 @@ const (
 )
 
 // Accept decides whether a client-published frame may be relayed, and turns it
-// into the [Event] that would be relayed.
+// into the [joaju.Event] that would be relayed.
 //
-// channel is the [ChannelName] the caller resolved from the frame's channel
-// field with [NewChannelName] and the socket's Grant -- so the tenant is
+// channel is the [joaju.ChannelName] the caller resolved from the frame's channel
+// field with [joaju.NewChannelName] and the socket's Grant -- so the tenant is
 // already settled and is the Grant's, never the name the sender typed. Its
-// [ChannelName.Requested] has to match what the frame said, which catches the
+// [joaju.ChannelName.Requested] has to match what the frame said, which catches the
 // caller resolving one name and relaying another. from is the sender, and it
-// ends up in [Event.Socket] so the relay does not send them their own message
+// ends up in [joaju.Event.Socket] so the relay does not send them their own message
 // back. sender and subscribed are the seat the channel is holding for them, and
-// [Channel.Find] answers both at once.
+// [joaju.Channel.Find] answers both at once.
 //
-// sender becomes [Event.UserID], and is the whole of who the receivers are told
-// this came from. It is the [Member] the channel seated, so it is the identity a
-// [SubscriptionPolicy] was asked about; it is the zero [Member] off a presence
+// sender becomes [joaju.Event.UserID], and is the whole of who the receivers are told
+// this came from. It is the [joaju.Member] the channel seated, so it is the identity a
+// [joaju.SubscriptionPolicy] was asked about; it is the zero [joaju.Member] off a presence
 // channel, and the relayed frame then carries no user_id at all. The frame's own
 // [Frame.UserID] is never read here, and that is the point of taking the sender
 // as an argument rather than off f: a client that writes a user_id into a client
@@ -692,25 +693,25 @@ const (
 // public channel is [ErrClientEventChannel]; not being subscribed is
 // [ErrNotSubscribed]. Each is a [ProtocolError], so [ErrorFrame] carries it to
 // the client with its code intact.
-func (c ClientEvents) Accept(f Frame, channel ChannelName, from SocketID, sender Member, subscribed bool) (Event, error) {
+func (c ClientEvents) Accept(f Frame, channel joaju.ChannelName, from joaju.SocketID, sender joaju.Member, subscribed bool) (joaju.Event, error) {
 	if !f.IsClientEvent() {
-		return Event{}, fmt.Errorf("%w: %s is not a client event", ErrInvalidMessage, f.Event)
+		return joaju.Event{}, fmt.Errorf("%w: %s is not a client event", ErrInvalidMessage, f.Event)
 	}
 	if c != ClientEventsOn {
-		return Event{}, ErrClientEventsDisabled
+		return joaju.Event{}, ErrClientEventsDisabled
 	}
 	if channel.IsZero() || f.Channel == "" {
-		return Event{}, fmt.Errorf("%w: the client event named no channel", ErrInvalidMessage)
+		return joaju.Event{}, fmt.Errorf("%w: the client event named no channel", ErrInvalidMessage)
 	}
 	if channel.Requested() != f.Channel {
-		return Event{}, fmt.Errorf("%w: the client event named %s and was resolved as %s", ErrInvalidMessage, f.Channel, channel.Requested())
+		return joaju.Event{}, fmt.Errorf("%w: the client event named %s and was resolved as %s", ErrInvalidMessage, f.Channel, channel.Requested())
 	}
 	if !channel.Type().Guarded() {
-		return Event{}, ErrClientEventChannel
+		return joaju.Event{}, ErrClientEventChannel
 	}
 	if !subscribed {
-		return Event{}, ErrNotSubscribed
+		return joaju.Event{}, ErrNotSubscribed
 	}
 
-	return Event{Name: f.Event, Channel: channel, Data: f.Data, Socket: from, UserID: sender.UserID}, nil
+	return joaju.Event{Name: f.Event, Channel: channel, Data: f.Data, Socket: from, UserID: sender.UserID}, nil
 }

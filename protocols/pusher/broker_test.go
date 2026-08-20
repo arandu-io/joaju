@@ -1,4 +1,4 @@
-package joaju
+package pusher
 
 import (
 	"context"
@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/arandu-io/hesape/auth"
+	"github.com/arandu-io/joaju"
 )
 
 // Everything in this file is named for the broker, because the package is one
@@ -18,7 +19,7 @@ import (
 
 // brokerTestCreate is the channel a client of tenant asks for, made through the
 // broker.
-func brokerTestCreate(t *testing.T, b Broker, tenant, requested string) Channel {
+func brokerTestCreate(t *testing.T, b joaju.Broker, tenant, requested string) joaju.Channel {
 	t.Helper()
 
 	held, err := b.FindOrCreate(context.Background(), channelTestJoinGrant(t, tenant, "maker"), channelTestName(t, tenant, requested))
@@ -30,8 +31,8 @@ func brokerTestCreate(t *testing.T, b Broker, tenant, requested string) Channel 
 }
 
 // brokerTestRequested is the requested names of a list of channels, which is
-// what an assertion about [Broker.All] reads.
-func brokerTestRequested(channels []Channel) []string {
+// what an assertion about [joaju.Broker.All] reads.
+func brokerTestRequested(channels []joaju.Channel) []string {
 	names := make([]string, 0, len(channels))
 	for _, held := range channels {
 		names = append(names, held.Name().Requested())
@@ -44,7 +45,7 @@ func TestMemoryBrokerFindAnswersErrNoChannelForOneNobodyMade(t *testing.T) {
 	b := NewMemoryBroker()
 
 	_, err := b.Find(context.Background(), channelTestJoinGrant(t, "acme", "u1"), channelTestName(t, "acme", "orders.17"))
-	if !errors.Is(err, ErrNoChannel) {
+	if !errors.Is(err, joaju.ErrNoChannel) {
 		t.Fatalf("Find() of a channel nobody made = %v, want ErrNoChannel", err)
 	}
 }
@@ -62,7 +63,7 @@ func TestMemoryBrokerFindOrCreateHandsBackTheChannelItMade(t *testing.T) {
 	if made.Name().String() != name.String() {
 		t.Fatalf("the channel is held as %q and was asked for as %q", made.Name().String(), name.String())
 	}
-	if made.Name().Type() != PrivateChannel {
+	if made.Name().Type() != joaju.PrivateChannel {
 		t.Fatalf("%s was made a %s channel", name.Requested(), made.Name().Type())
 	}
 
@@ -83,8 +84,8 @@ func TestMemoryBrokerFindOrCreateHandsBackTheChannelItMade(t *testing.T) {
 	}
 }
 
-// The key is [ChannelName.String] and this is what that buys. Two customers ask
-// for the same name all day; a registry keyed by [ChannelName.Requested] would
+// The key is [joaju.ChannelName.String] and this is what that buys. Two customers ask
+// for the same name all day; a registry keyed by [joaju.ChannelName.Requested] would
 // merge them, and the merge is not an error anywhere -- both asked for a channel
 // that exists.
 func TestMemoryBrokerKeepsTwoTenantsAskingForTheSameNameApart(t *testing.T) {
@@ -108,7 +109,7 @@ func TestMemoryBrokerKeepsTwoTenantsAskingForTheSameNameApart(t *testing.T) {
 	}
 }
 
-// This is the refusal [ErrWrongTenant] exists for: a name built under one Grant
+// This is the refusal [joaju.ErrWrongTenant] exists for: a name built under one Grant
 // and carried to another. Both values are valid, and the comparison in the
 // broker is what notices.
 func TestMemoryBrokerRefusesAGrantFromAnotherTenant(t *testing.T) {
@@ -119,15 +120,15 @@ func TestMemoryBrokerRefusesAGrantFromAnotherTenant(t *testing.T) {
 	name := held.Name()
 	theirs := channelTestJoinGrant(t, "globex", "u1")
 
-	if _, err := b.Find(ctx, theirs, name); !errors.Is(err, ErrWrongTenant) {
+	if _, err := b.Find(ctx, theirs, name); !errors.Is(err, joaju.ErrWrongTenant) {
 		t.Fatalf("a client of globex was answered acme's %q: %v", name.Requested(), err)
 	} else if !errors.Is(err, auth.ErrForbidden) {
 		t.Fatalf("the refusal does not read as forbidden, so a handler answers 500 instead of 403: %v", err)
 	}
-	if _, err := b.FindOrCreate(ctx, theirs, name); !errors.Is(err, ErrWrongTenant) {
+	if _, err := b.FindOrCreate(ctx, theirs, name); !errors.Is(err, joaju.ErrWrongTenant) {
 		t.Fatalf("a client of globex reached acme's %q through FindOrCreate: %v", name.Requested(), err)
 	}
-	if err := b.Remove(ctx, theirs, name); !errors.Is(err, ErrWrongTenant) {
+	if err := b.Remove(ctx, theirs, name); !errors.Is(err, joaju.ErrWrongTenant) {
 		t.Fatalf("a client of globex removed acme's %q: %v", name.Requested(), err)
 	}
 
@@ -143,7 +144,7 @@ func TestMemoryBrokerRefusesAGrantFromAnotherTenant(t *testing.T) {
 }
 
 // The Grant that opened the socket is not the Grant that reaches a channel. If
-// it were, no [SubscriptionPolicy] would ever run and
+// it were, no [joaju.SubscriptionPolicy] would ever run and
 // every channel of the tenant would be readable by anyone allowed to connect.
 func TestMemoryBrokerRefusesTheGrantThatOpenedTheSocket(t *testing.T) {
 	b := NewMemoryBroker()
@@ -193,7 +194,7 @@ func TestMemoryBrokerAllAnswersOnlyTheGrantsTenant(t *testing.T) {
 			t.Fatalf("a client of acme was answered %q of %s: the list route publishes one customer's channel names to another", held.Name().Requested(), held.Name().Tenant())
 		}
 	}
-	// Sorted by [ChannelName.String], which inside one tenant is the requested
+	// Sorted by [joaju.ChannelName.String], which inside one tenant is the requested
 	// name: a route that answers in a different order every time is one nobody
 	// can diff.
 	want := []string{"orders.17", "private-orders.18"}
@@ -223,7 +224,7 @@ func TestMemoryBrokerRemovesAChannelOnlyWhenItIsEmpty(t *testing.T) {
 		t.Fatalf("FindOrCreate() = %v", err)
 	}
 	conn, _ := channelTestConnection(t, "acme", "u1")
-	if err := held.Subscribe(ctx, g, conn, Member{}); err != nil {
+	if err := held.Subscribe(ctx, g, conn, joaju.Member{}); err != nil {
 		t.Fatalf("subscribing to %s: %v", name.Requested(), err)
 	}
 
@@ -238,14 +239,14 @@ func TestMemoryBrokerRemovesAChannelOnlyWhenItIsEmpty(t *testing.T) {
 		t.Fatal("the channel was replaced rather than kept")
 	}
 
-	// The last subscriber leaves, which is what [Observer.ChannelRemoved] means.
+	// The last subscriber leaves, which is what [joaju.Observer.ChannelRemoved] means.
 	if err := held.Unsubscribe(ctx, conn); err != nil {
 		t.Fatalf("unsubscribing from %s: %v", name.Requested(), err)
 	}
 	if err := b.Remove(ctx, g, name); err != nil {
 		t.Fatalf("Remove() of an empty channel = %v", err)
 	}
-	if _, err := b.Find(ctx, g, name); !errors.Is(err, ErrNoChannel) {
+	if _, err := b.Find(ctx, g, name); !errors.Is(err, joaju.ErrNoChannel) {
 		t.Fatalf("the last subscriber left, the channel was removed, and it is still held: %v", err)
 	}
 
@@ -274,7 +275,7 @@ func TestMemoryBrokerHandsOneChannelToEverySubscriberOfIt(t *testing.T) {
 	}
 
 	var mu sync.Mutex
-	seen := make(map[Channel]int)
+	seen := make(map[joaju.Channel]int)
 
 	var wg sync.WaitGroup
 	for _, g := range grants {
@@ -311,9 +312,9 @@ func TestMemoryBrokerIsSafeForConcurrentUse(t *testing.T) {
 	type actor struct {
 		tenant string
 		grant  auth.Grant
-		conn   *Connection
-		shared ChannelName
-		own    ChannelName
+		conn   *joaju.Connection
+		shared joaju.ChannelName
+		own    joaju.ChannelName
 	}
 	actors := make([]actor, 0, 8)
 	for i := range 8 {
@@ -352,12 +353,12 @@ func TestMemoryBrokerIsSafeForConcurrentUse(t *testing.T) {
 
 					return
 				}
-				if err := shared.Subscribe(ctx, a.grant, a.conn, Member{}); err != nil {
+				if err := shared.Subscribe(ctx, a.grant, a.conn, joaju.Member{}); err != nil {
 					t.Errorf("subscribing to %s of %s: %v", a.shared.Requested(), a.tenant, err)
 
 					return
 				}
-				if err := own.Subscribe(ctx, a.grant, a.conn, Member{}); err != nil {
+				if err := own.Subscribe(ctx, a.grant, a.conn, joaju.Member{}); err != nil {
 					t.Errorf("subscribing to %s of %s: %v", a.own.Requested(), a.tenant, err)
 
 					return

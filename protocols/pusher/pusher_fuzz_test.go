@@ -1,4 +1,4 @@
-package joaju
+package pusher
 
 import (
 	"bytes"
@@ -11,6 +11,7 @@ import (
 
 	"github.com/arandu-io/hesape/auth"
 	"github.com/arandu-io/hesape/broadcasting"
+	"github.com/arandu-io/joaju"
 )
 
 // fuzzTenant is the customer every Grant in these targets belongs to.
@@ -45,13 +46,13 @@ func fuzzNests(data []byte) bool {
 	return openers*2 >= len(data)
 }
 
-// fuzzJoinGrant is the Grant a [SubscriptionPolicy] issues, for one subject of
+// fuzzJoinGrant is the Grant a [joaju.SubscriptionPolicy] issues, for one subject of
 // [fuzzTenant].
 func fuzzJoinGrant(t testing.TB, user string) auth.Grant {
 	t.Helper()
 
 	g, err := auth.Authorize(context.Background(), channelTestJoinPolicy{},
-		auth.Subject{ID: user, Tenant: fuzzTenant}, broadcasting.ChannelJoin, Subscription{})
+		auth.Subject{ID: user, Tenant: fuzzTenant}, broadcasting.ChannelJoin, joaju.Subscription{})
 	if err != nil {
 		t.Fatalf("authorizing %s to join: %v", user, err)
 	}
@@ -159,16 +160,16 @@ func FuzzDecode(f *testing.F) {
 // presence channel it is on. So the assertion is stated the other way round --
 // nothing outside the four protocol events and the client- namespace may pass.
 func FuzzClientMaySend(f *testing.F) {
-	f.Add(EventSubscribe)
-	f.Add(EventMemberAdded)
+	f.Add(joaju.EventSubscribe)
+	f.Add(joaju.EventMemberAdded)
 	f.Add(ClientEventPrefix + "typing")
-	f.Add(ProtocolPrefix)
-	f.Add(InternalPrefix + "subscription_succeeded")
+	f.Add(joaju.ProtocolPrefix)
+	f.Add(joaju.InternalPrefix + "subscription_succeeded")
 	f.Add("orders.updated")
 	f.Add("")
 	// Case and whitespace around a name that would otherwise pass, which is
 	// where a prefix test written with a fold or a trim would let one through.
-	f.Add(" " + EventSubscribe)
+	f.Add(" " + joaju.EventSubscribe)
 	f.Add(strings.ToUpper(ClientEventPrefix) + "typing")
 
 	f.Fuzz(func(t *testing.T, event string) {
@@ -178,7 +179,7 @@ func FuzzClientMaySend(f *testing.F) {
 		}
 
 		switch event {
-		case EventSubscribe, EventUnsubscribe, EventPing, EventPong:
+		case joaju.EventSubscribe, joaju.EventUnsubscribe, joaju.EventPing, joaju.EventPong:
 			return
 		}
 		if !strings.HasPrefix(event, ClientEventPrefix) {
@@ -187,7 +188,7 @@ func FuzzClientMaySend(f *testing.F) {
 		// A client event name that also wears one of the server's namespaces
 		// would be relayed to every other browser on the channel under a name
 		// they read as the server's.
-		if strings.HasPrefix(event, ProtocolPrefix) || strings.HasPrefix(event, InternalPrefix) {
+		if strings.HasPrefix(event, joaju.ProtocolPrefix) || strings.HasPrefix(event, joaju.InternalPrefix) {
 			t.Fatalf("a client may send %q, which is in a reserved namespace", event)
 		}
 	})
@@ -222,7 +223,7 @@ func FuzzSubscribeRequest(f *testing.F) {
 	f.Add([]byte(nil))
 
 	f.Fuzz(func(t *testing.T, data []byte) {
-		frame := Frame{Event: EventSubscribe, Data: json.RawMessage(data)}
+		frame := Frame{Event: joaju.EventSubscribe, Data: json.RawMessage(data)}
 
 		request, err := frame.Subscribe()
 		if err != nil {
@@ -267,7 +268,7 @@ func FuzzSubscribeRequest(f *testing.F) {
 
 		// An unsubscription reads the same field out of the same shape, so the
 		// two decoders must agree about which channel was named.
-		leaving, err := Frame{Event: EventUnsubscribe, Data: json.RawMessage(data)}.Unsubscribe()
+		leaving, err := Frame{Event: joaju.EventUnsubscribe, Data: json.RawMessage(data)}.Unsubscribe()
 		if err != nil {
 			t.Fatalf("unsubscribing from data a subscription accepted = %v", err)
 		}
@@ -291,7 +292,7 @@ func FuzzClientEventsAccept(f *testing.F) {
 	f.Add(ClientEventPrefix+"typing", "orders", "orders", []byte(`{}`), "", "u1", true, true)
 	f.Add(ClientEventPrefix+"typing", "private-orders", "private-orders", []byte(`{}`), "", "", true, true)
 	f.Add(ClientEventPrefix+"typing", "private-orders", "private-orders", []byte(`{}`), "", "u1", false, true)
-	f.Add(EventSubscribe, "private-orders", "private-orders", []byte(`{}`), "", "u1", true, true)
+	f.Add(joaju.EventSubscribe, "private-orders", "private-orders", []byte(`{}`), "", "u1", true, true)
 	// The frame naming one channel while the caller resolved another, which is
 	// the mistake that would relay a message into a channel nobody asked about.
 	f.Add(ClientEventPrefix+"typing", "private-a", "private-b", []byte(`{}`), "", "u1", true, true)
@@ -302,9 +303,9 @@ func FuzzClientEventsAccept(f *testing.F) {
 	f.Fuzz(func(t *testing.T, event, named, resolved string, data []byte, claimed, seated string, on, subscribed bool) {
 		// The zero name is a legitimate input: it is what a failed resolution
 		// hands the caller, and Accept has to refuse it rather than read it.
-		channel, err := NewChannelName(fuzzJoinGrant(t, "caller"), resolved)
+		channel, err := joaju.NewChannelName(fuzzJoinGrant(t, "caller"), resolved)
 		if err != nil {
-			channel = ChannelName{}
+			channel = joaju.ChannelName{}
 		}
 
 		events := ClientEventsOff
@@ -313,7 +314,7 @@ func FuzzClientEventsAccept(f *testing.F) {
 		}
 		frame := Frame{Event: event, Channel: named, Data: json.RawMessage(data), UserID: claimed}
 
-		got, err := events.Accept(frame, channel, "7.1", Member{UserID: seated}, subscribed)
+		got, err := events.Accept(frame, channel, "7.1", joaju.Member{UserID: seated}, subscribed)
 		if err != nil {
 			return
 		}

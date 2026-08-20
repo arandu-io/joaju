@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/arandu-io/joaju"
+	"github.com/arandu-io/joaju/protocols/pusher"
 )
 
 // lookup turns a map into an [environment], so a test never sets a variable on
@@ -94,7 +94,7 @@ func TestLoadConfigLeavesTheLibrarysDefaultsToTheLibrary(t *testing.T) {
 	if cfg.LogLevel != slog.LevelInfo {
 		t.Errorf("LogLevel = %s, want %s", cfg.LogLevel, slog.LevelInfo)
 	}
-	if cfg.ClientEvents != joaju.ClientEventsOff {
+	if cfg.ClientEvents != pusher.ClientEventsOff {
 		t.Error("client events are on without being asked for, and off is the default they should have")
 	}
 	if cfg.AllowedOrigins != nil {
@@ -137,7 +137,7 @@ func TestLoadConfigReadsEveryVariable(t *testing.T) {
 	if want := []string{"https://app.example.com", "https://admin.example.com"}; !slices.Equal(cfg.AllowedOrigins, want) {
 		t.Errorf("AllowedOrigins = %q, want %q", cfg.AllowedOrigins, want)
 	}
-	if cfg.ClientEvents != joaju.ClientEventsOn {
+	if cfg.ClientEvents != pusher.ClientEventsOn {
 		t.Error("ClientEvents is off after being asked for")
 	}
 	if cfg.MaxMessageSize != 20480 || cfg.MaxBodySize != 2097152 {

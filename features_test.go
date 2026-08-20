@@ -2,16 +2,105 @@ package joaju
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/arandu-io/hesape/auth"
+	"github.com/arandu-io/hesape/broadcasting"
 )
 
+// The doubles below are this package's, and every test file in it shares them:
+// a socket, the sink under it, and the two policies that let one be opened. They
+// are here rather than beside the test that first needed them because three
+// files need them, and a helper that lives with one of its callers reads as
+// though the others were borrowing it.
+
+// connTestSink is a [Sink] that keeps what was written to it.
+type connTestSink struct {
+	mu         sync.Mutex
+	messages   [][]byte
+	terminated bool
+	err        error
+}
+
+func (s *connTestSink) Send(_ context.Context, message []byte) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.err != nil {
+		return s.err
+	}
+	s.messages = append(s.messages, append([]byte(nil), message...))
+
+	return nil
+}
+
+func (s *connTestSink) Terminate(_ context.Context) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.terminated = true
+
+	return nil
+}
+
+// connTestConnectPolicy allows every handshake, so that a test can hold a
+// connection. Whether a socket may open is not what these files are about.
+type connTestConnectPolicy struct{}
+
+func (connTestConnectPolicy) Can(_ context.Context, _ auth.Subject, _ auth.Action, _ Handshake) error {
+	return nil
+}
+
+// connTestJoinPolicy allows every subscription, which is the case worth
+// testing: the tenant checks a channel makes must refuse subscriptions a policy
+// said yes to, because that is the only refusal a policy cannot make.
+type connTestJoinPolicy struct{}
+
+func (connTestJoinPolicy) Can(_ context.Context, _ auth.Subject, _ auth.Action, _ Subscription) error {
+	return nil
+}
+
+// connTestConnection is a connection held by user of tenant.
+func connTestConnection(t *testing.T, tenant, user string) (*Connection, *connTestSink) {
+	t.Helper()
+
+	id := SocketID(fmt.Sprintf("%s.%s", tenant, user))
+	g, err := auth.Authorize(context.Background(), connTestConnectPolicy{},
+		auth.Subject{ID: user, Tenant: tenant}, Connect, Handshake{Socket: id})
+	if err != nil {
+		t.Fatalf("authorizing the handshake of %s of %s: %v", user, tenant, err)
+	}
+
+	sink := &connTestSink{}
+	conn, err := NewConnection(g, id, sink)
+	if err != nil {
+		t.Fatalf("opening the socket of %s of %s: %v", user, tenant, err)
+	}
+
+	return conn, sink
+}
+
+// connTestJoinGrant is the Grant a [SubscriptionPolicy] issues.
+func connTestJoinGrant(t *testing.T, tenant, user string) auth.Grant {
+	t.Helper()
+
+	g, err := auth.Authorize(context.Background(), connTestJoinPolicy{},
+		auth.Subject{ID: user, Tenant: tenant}, broadcasting.ChannelJoin, Subscription{})
+	if err != nil {
+		t.Fatalf("authorizing %s of %s to join: %v", user, tenant, err)
+	}
+
+	return g
+}
+
 // connFor is a connection held by user of tenant, using the same handshake
-// policy the channel tests use.
+// policy the rest of these tests use.
 func connFor(t *testing.T, tenant, user string) *Connection {
 	t.Helper()
-	conn, _ := channelTestConnection(t, tenant, user)
+	conn, _ := connTestConnection(t, tenant, user)
 	return conn
 }
 

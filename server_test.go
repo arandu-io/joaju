@@ -15,7 +15,9 @@ import (
 	"time"
 
 	"github.com/arandu-io/hesape/auth"
+	"github.com/arandu-io/hesape/broadcasting"
 	"github.com/arandu-io/joaju"
+	"github.com/arandu-io/joaju/protocols/pusher"
 	"github.com/arandu-io/joaju/ws"
 )
 
@@ -25,6 +27,36 @@ const (
 	serverAppID  = "app-1"
 	serverAppKey = "key-1"
 )
+
+// tenant is the customer every channel in this file belongs to.
+const tenant = "acme"
+
+// channelName is the name of a channel of tenant, which is the only way there
+// is to build one.
+func channelName(t *testing.T, requested string) joaju.ChannelName {
+	t.Helper()
+
+	g := auth.SystemGrant(broadcasting.ChannelJoin, tenant)
+	name, err := joaju.NewChannelName(g, requested)
+	if err != nil {
+		t.Fatalf("NewChannelName(%q) = %v", requested, err)
+	}
+
+	return name
+}
+
+// encode is a frame as the bytes a client reads, so that a test can compare
+// what a socket was written against what the protocol would have written.
+func encode(t *testing.T, f pusher.Frame) string {
+	t.Helper()
+
+	b, err := pusher.Encode(f)
+	if err != nil {
+		t.Fatalf("Encode(%v) = %v", f, err)
+	}
+
+	return string(b)
+}
 
 // serverConnectPolicy answers every handshake the same way, so that a test can
 // say "allowed" or "refused" and look at what the server did next.
@@ -217,19 +249,19 @@ func (p *serverProtocol) Close(_ context.Context, conn *joaju.Connection) {
 // would prove that just as well while telling a reader nothing about which
 // refusal reached which socket.
 func (p *serverProtocol) Refuse(r joaju.Refusal) []byte {
-	var refusal joaju.ProtocolError
+	var refusal pusher.ProtocolError
 	switch r {
 	case joaju.RefusalOverQuota:
-		refusal = joaju.ErrOverQuota
+		refusal = pusher.ErrOverQuota
 	case joaju.RefusalRateLimited:
-		refusal = joaju.ErrRateLimited
+		refusal = pusher.ErrRateLimited
 	case joaju.RefusalUnreadable:
-		refusal = joaju.ErrInvalidMessage
+		refusal = pusher.ErrInvalidMessage
 	default:
 		return nil
 	}
 
-	message, err := joaju.Encode(refusal.Frame())
+	message, err := pusher.Encode(refusal.Frame())
 	if err != nil {
 		return nil
 	}
@@ -961,14 +993,14 @@ func TestServerTellsARefusedSocketItIsOverQuotaBeforeClosingIt(t *testing.T) {
 	}
 
 	var data struct {
-		Code    joaju.ErrorCode `json:"code"`
-		Message string          `json:"message"`
+		Code    pusher.ErrorCode `json:"code"`
+		Message string           `json:"message"`
 	}
 	if err := json.Unmarshal([]byte(frame.Data), &data); err != nil {
 		t.Fatalf("the refusal's data %q is not the error payload: %v", frame.Data, err)
 	}
-	if data.Code != joaju.CodeOverQuota {
-		t.Fatalf("the refused socket was told %d, want %d", data.Code, joaju.CodeOverQuota)
+	if data.Code != pusher.CodeOverQuota {
+		t.Fatalf("the refused socket was told %d, want %d", data.Code, pusher.CodeOverQuota)
 	}
 
 	// And then it closes, because the frame is a refusal and not a connection.
@@ -1050,7 +1082,7 @@ func TestServerRefusesTheFramesPastTheSocketsRateLimit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reading the answer to a burst past the limit = %v", err)
 	}
-	if want := encode(t, joaju.ErrRateLimited.Frame()); string(message) != want {
+	if want := encode(t, pusher.ErrRateLimited.Frame()); string(message) != want {
 		t.Fatalf("the answer to a burst past the limit was %s, want %s", message, want)
 	}
 
@@ -1098,7 +1130,7 @@ func TestServerDropsAFrameThatIsNotText(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reading the answer to a binary frame = %v", err)
 	}
-	if want := encode(t, joaju.ErrInvalidMessage.Frame()); string(message) != want {
+	if want := encode(t, pusher.ErrInvalidMessage.Frame()); string(message) != want {
 		t.Fatalf("the answer to a binary frame was %s, want %s", message, want)
 	}
 

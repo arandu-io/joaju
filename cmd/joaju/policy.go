@@ -89,7 +89,7 @@ func (p connectPolicy) Can(_ context.Context, s auth.Subject, a auth.Action, h j
 // [joaju.Subscription.Auth], and this is what recomputes it.
 //
 // That is not a second way to allow a subscription, which is what
-// [joaju.SubscribeRequest.Auth] rules out and still rules out for an
+// [pusher.SubscribeRequest.Auth] rules out and still rules out for an
 // application that has a front door of its own. This process is the case with
 // no front door: nothing else in it identifies a browser, so there is no first
 // mechanism for this to compete with. And it stays evidence rather than

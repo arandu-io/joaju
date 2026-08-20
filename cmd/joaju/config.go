@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/arandu-io/hesape/auth"
-	"github.com/arandu-io/joaju"
+	"github.com/arandu-io/joaju/protocols/pusher"
 )
 
 // The prefix every variable this process reads carries.
@@ -87,8 +87,8 @@ type config struct {
 
 	// ClientEvents is whether a frame one browser publishes is relayed to the
 	// others on the channel. Off unless a deployment says otherwise, which is
-	// the protocol's default too. See [joaju.ClientEvents].
-	ClientEvents joaju.ClientEvents
+	// the protocol's default too. See [pusher.ClientEvents].
+	ClientEvents pusher.ClientEvents
 
 	// The socket's limits, passed through untouched. Zero is the Default of the
 	// same name in [joaju.ServerConfig], except MaxConnections, where a negative
@@ -103,8 +103,8 @@ type config struct {
 	PongTimeout          time.Duration
 
 	// MaxChannelsPerConnection is the protocol's limit rather than the socket's,
-	// so it is passed to [joaju.PusherConfig] and not to the server. Zero is
-	// [joaju.DefaultMaxChannelsPerConnection] and a negative number is no limit.
+	// so it is passed to [pusher.PusherConfig] and not to the server. Zero is
+	// [pusher.DefaultMaxChannelsPerConnection] and a negative number is no limit.
 	MaxChannelsPerConnection int
 
 	// ShutdownTimeout is the deadline the signal handler works to. Zero means
@@ -301,21 +301,21 @@ func (env environment) duration(name string) (time.Duration, error) {
 // value that turns it on is the value somebody types once and nobody reads
 // again: "false" quietly enabling client events would be the worst possible
 // direction for that mistake to fail in.
-func (env environment) clientEvents(name string) (joaju.ClientEvents, error) {
+func (env environment) clientEvents(name string) (pusher.ClientEvents, error) {
 	raw := env.text(name)
 	if raw == "" {
-		return joaju.ClientEventsOff, nil
+		return pusher.ClientEventsOff, nil
 	}
 
 	on, err := strconv.ParseBool(raw)
 	if err != nil {
-		return joaju.ClientEventsOff, fmt.Errorf("joaju: %s%s is %q, which is not true or false", envPrefix, name, raw)
+		return pusher.ClientEventsOff, fmt.Errorf("joaju: %s%s is %q, which is not true or false", envPrefix, name, raw)
 	}
 	if on {
-		return joaju.ClientEventsOn, nil
+		return pusher.ClientEventsOn, nil
 	}
 
-	return joaju.ClientEventsOff, nil
+	return pusher.ClientEventsOff, nil
 }
 
 // level reads the lowest level the log writes: debug, info, warn or error.

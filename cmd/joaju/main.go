@@ -49,6 +49,7 @@ import (
 	"time"
 
 	"github.com/arandu-io/joaju"
+	"github.com/arandu-io/joaju/protocols/pusher"
 )
 
 func main() {
@@ -148,7 +149,7 @@ func run() error {
 // rule for it, and a seam to swap them for others would be a second way to
 // decide who may connect.
 func newServer(cfg config, log *slog.Logger) (*joaju.Server, error) {
-	broker := joaju.NewMemoryBroker()
+	broker := pusher.NewMemoryBroker()
 	subscribe := subscriptionPolicy{
 		tenant: cfg.Tenant,
 		appKey: cfg.AppKey,
@@ -198,7 +199,7 @@ func newServer(cfg config, log *slog.Logger) (*joaju.Server, error) {
 // it is the only line that has to change if the frame layer is spelled
 // differently when it lands.
 func frameLayer(broker joaju.Broker, subscribe joaju.SubscriptionPolicy, cfg config) joaju.Protocol {
-	return joaju.NewPusher(broker, subscribe, joaju.PusherConfig{
+	return pusher.NewPusher(broker, subscribe, pusher.PusherConfig{
 		// The client is told to ping at half the read deadline. It is an
 		// instruction a browser obeys and PongTimeout is a deadline the server
 		// enforces, so the first has to sit comfortably below the second: a

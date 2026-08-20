@@ -42,7 +42,7 @@ func FuzzNewChannelName(f *testing.F) {
 	f.Add("acme", strings.Repeat("a", 4096))
 
 	f.Fuzz(func(t *testing.T, tenant, requested string) {
-		g, err := auth.Authorize(context.Background(), channelTestJoinPolicy{},
+		g, err := auth.Authorize(context.Background(), connTestJoinPolicy{},
 			auth.Subject{ID: "somebody", Tenant: tenant}, broadcasting.ChannelJoin, Subscription{})
 		if err != nil {
 			return

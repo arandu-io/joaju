@@ -176,9 +176,9 @@ type relayMessage struct {
 	// sender's own instance, which is the whole of what a client event is for.
 	//
 	// It is the [Member.UserID] the channel seated and never the one the sending
-	// frame claimed -- [ClientEvents.Accept] is the only thing that sets it -- so
-	// relaying it discloses nothing that was not already going to the receivers
-	// on the instance it came from.
+	// frame claimed -- the protocol reads it off the seat and off nothing else
+	// -- so relaying it discloses nothing that was not already going to the
+	// receivers on the instance it came from.
 	UserID string `json:"user_id,omitempty"`
 }
 
@@ -1287,14 +1287,14 @@ func (r *Relay) newRequestID() string {
 //
 // # Wire it once and hand it to both
 //
-// The same value has to reach the [Protocol] -- [NewPusher] takes a Broker --
-// and [ServerConfig.Broker]. A Protocol holding the raw Broker never joins a
-// topic, however well the server is configured, because a socket's subscription
-// passes through the Protocol and not through the server.
+// The same value has to reach the [Protocol] -- which is built over a Broker of
+// its own -- and [ServerConfig.Broker]. A Protocol holding the raw Broker never
+// joins a topic, however well the server is configured, because a socket's
+// subscription passes through the Protocol and not through the server.
 //
 //	relay, err := joaju.NewRelay(ctx, id, bus, log)
-//	broker := joaju.RelayedBroker(joaju.NewMemoryBroker(), relay)
-//	protocol := joaju.NewPusher(broker, subscribe, joaju.PusherConfig{})
+//	broker := joaju.RelayedBroker(pusher.NewMemoryBroker(), relay)
+//	protocol := pusher.NewPusher(broker, subscribe, pusher.PusherConfig{})
 //	server, err := joaju.NewServer(joaju.ServerConfig{
 //		Broker: broker, Protocol: protocol, Relay: relay,
 //	})
@@ -1323,6 +1323,34 @@ type relayedBroker struct {
 	// without one holds the application's Broker unwrapped.
 	relay *Relay
 }
+
+// Carrier is a [Broker] that also reaches the other instances.
+//
+// [RelayedBroker] answers one and a plain [Broker] does not, so asking a Broker
+// for this is asking whether there is a fleet at all. A [Protocol] relaying an
+// event a client published asks its own Broker, because the Broker is the one
+// value the wiring already makes the two halves of a server share -- a Protocol
+// holding a [Relay] of its own would be a second thing to wire, a second thing
+// to leave half-wired, and a second answer to which relay this instance is on.
+type Carrier interface {
+	Broker
+
+	// Carry hands an event to the other instances, after the sockets on this
+	// one have been served by [Channel.Broadcast] and never instead of it.
+	//
+	// It answers nothing because there is nothing the caller could do with the
+	// answer: every socket here already has the message, and a bus that is down
+	// costs reach and not delivery. The failure is recorded where it happens.
+	Carry(ctx context.Context, e Event)
+}
+
+// Carry is [Carrier.Carry], and it is the same call [Server.carry] makes for
+// the events API: both ends of the outbound half arrive at one place.
+func (b relayedBroker) Carry(ctx context.Context, e Event) {
+	b.relay.carry(ctx, e)
+}
+
+var _ Carrier = relayedBroker{}
 
 // FindOrCreate is [Broker.FindOrCreate], and joins the fleet's topic for the
 // channel it answers with.
@@ -1370,7 +1398,7 @@ func (b relayedBroker) Remove(ctx context.Context, g auth.Grant, name ChannelNam
 
 	// Remove is a request and not a promise: a Broker may keep a channel that
 	// filled again between the caller deciding it was empty and this call
-	// arriving, and [NewMemoryBroker] does exactly that. Leaving the topic
+	// arriving, and the in-memory one does exactly that. Leaving the topic
 	// anyway would stop this instance receiving broadcasts for a channel that
 	// still has subscribers on it -- messages lost, silently, for as long as
 	// they stay.

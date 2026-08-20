@@ -1,10 +1,14 @@
-package joaju_test
+package pusher_test
 
 import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
+	"log/slog"
 	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -13,11 +17,12 @@ import (
 
 	"github.com/arandu-io/hesape/auth"
 	"github.com/arandu-io/joaju"
+	"github.com/arandu-io/joaju/protocols/pusher"
 	"github.com/arandu-io/joaju/ws"
 )
 
 // Everything in this file runs against a real [joaju.Server] over a real socket,
-// with [joaju.NewMemoryBroker] behind it. A Protocol tested through doubles
+// with [pusher.NewMemoryBroker] behind it. A Protocol tested through doubles
 // proves that its own switch works; what is worth proving is that a browser
 // sending the bytes a browser sends is answered with the bytes a Pusher client
 // reads, which is the whole of this type's job.
@@ -103,11 +108,35 @@ func (o *protocolObserver) waitForRemoved(t *testing.T, name string) {
 	t.Fatalf("the observer was told about %v, want %s among them", removed, name)
 }
 
-// protocolFixture is one server speaking the Pusher protocol, and the two values
-// a test looks into.
-type protocolFixture struct {
-	*serverFixture
+// The application this file's server is. One server is one application, so
+// these are values and not a lookup.
+const (
+	protocolAppID  = "app-1"
+	protocolAppKey = "key-1"
+)
 
+// protocolConnectPolicy allows every handshake, so that a test reaches the
+// frames. Whether a socket may open at all is the server's to test.
+type protocolConnectPolicy struct{}
+
+func (protocolConnectPolicy) Can(context.Context, auth.Subject, auth.Action, joaju.Handshake) error {
+	return nil
+}
+
+// protocolSubject is the subject hesape/auth's Authenticate middleware would
+// have put on the context. Nothing here authenticates: it reads what the
+// framework's front door left there.
+func protocolSubject(next http.Handler, subject auth.Subject) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		next.ServeHTTP(w, r.WithContext(auth.WithSubject(r.Context(), subject)))
+	})
+}
+
+// protocolFixture is one server speaking the Pusher protocol, and the values a
+// test looks into.
+type protocolFixture struct {
+	http     *httptest.Server
+	server   *joaju.Server
 	policy   *protocolPolicy
 	observer *protocolObserver
 }
@@ -115,7 +144,7 @@ type protocolFixture struct {
 // protocolKeepingBroker keeps what it is asked to remove.
 //
 // It is a Broker doing what [joaju.Broker.Remove] allows: the call is a request
-// and not a promise, and [joaju.NewMemoryBroker] itself refuses it for a channel
+// and not a promise, and [pusher.NewMemoryBroker] itself refuses it for a channel
 // that filled up again. Here it always refuses, so that the case can be asserted
 // without racing a subscription against an unsubscription.
 type protocolKeepingBroker struct{ joaju.Broker }
@@ -131,28 +160,110 @@ func (protocolKeepingBroker) Remove(context.Context, auth.Grant, joaju.ChannelNa
 //
 // The Broker is the in-memory one unless a test hands over another, because what
 // this file is about is the frames a real one produces.
-func newProtocolFixture(t *testing.T, cfg joaju.PusherConfig, over ...joaju.Broker) *protocolFixture {
+func newProtocolFixture(t *testing.T, cfg pusher.PusherConfig, over ...joaju.Broker) *protocolFixture {
 	t.Helper()
 
 	policy := &protocolPolicy{}
 	observer := &protocolObserver{}
 	cfg.Observer = observer
 
-	var broker joaju.Broker = joaju.NewMemoryBroker()
+	var broker joaju.Broker = pusher.NewMemoryBroker()
 	if len(over) == 1 {
 		broker = over[0]
 	}
 
-	return &protocolFixture{
-		serverFixture: newServerFixture(t, joaju.ServerConfig{
-			Broker:    broker,
-			Subscribe: policy,
-			Protocol:  joaju.NewPusher(broker, policy, cfg),
-			Observer:  observer,
-		}),
+	server, err := joaju.NewServer(joaju.ServerConfig{
+		AppID:     protocolAppID,
+		AppKey:    protocolAppKey,
+		Broker:    broker,
+		Connect:   protocolConnectPolicy{},
+		Subscribe: policy,
+		Protocol:  pusher.NewPusher(broker, policy, cfg),
+		Observer:  observer,
+		// A refusal is logged, and several tests here cause one on purpose. The
+		// suite's output is not where they are read.
+		Log: slog.New(slog.DiscardHandler),
+	})
+	if err != nil {
+		t.Fatalf("NewServer() = %v", err)
+	}
+
+	f := &protocolFixture{
+		http:     httptest.NewServer(protocolSubject(server, auth.Subject{ID: "u1", Tenant: tenant})),
+		server:   server,
 		policy:   policy,
 		observer: observer,
 	}
+	t.Cleanup(func() {
+		server.Close(context.Background())
+		f.http.Close()
+	})
+
+	return f
+}
+
+// host is what a same-origin request claims, and what the upgrade compares the
+// Origin header against.
+func (f *protocolFixture) host(t *testing.T) string {
+	t.Helper()
+
+	u, err := url.Parse(f.http.URL)
+	if err != nil {
+		t.Fatalf("parsing %q = %v", f.http.URL, err)
+	}
+
+	return u.Host
+}
+
+// get and post are the two shapes of API call this file makes.
+func (f *protocolFixture) get(t *testing.T, path string) (int, []byte) {
+	t.Helper()
+
+	response, err := f.http.Client().Get(f.http.URL + path)
+	if err != nil {
+		t.Fatalf("GET %s = %v", path, err)
+	}
+	defer func() { _ = response.Body.Close() }()
+
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatalf("reading GET %s = %v", path, err)
+	}
+
+	return response.StatusCode, body
+}
+
+func (f *protocolFixture) post(t *testing.T, path, body string) (int, []byte) {
+	t.Helper()
+
+	response, err := f.http.Client().Post(f.http.URL+path, "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST %s = %v", path, err)
+	}
+	defer func() { _ = response.Body.Close() }()
+
+	read, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatalf("reading POST %s = %v", path, err)
+	}
+
+	return response.StatusCode, read
+}
+
+// dial opens the socket with the given Origin header. An empty origin sends no
+// header at all, which is what a non-browser client does.
+func (f *protocolFixture) dial(t *testing.T, origin string) (*ws.Conn, *http.Response, error) {
+	t.Helper()
+
+	header := http.Header{}
+	if origin != "" {
+		header.Set("Origin", origin)
+	}
+
+	dialer := *ws.DefaultDialer
+	dialer.HandshakeTimeout = 5 * time.Second
+
+	return dialer.Dial("ws"+strings.TrimPrefix(f.http.URL, "http")+"/app/"+protocolAppKey, header)
 }
 
 // waitForConnections waits until the server holds this many sockets.
@@ -166,7 +277,7 @@ func (f *protocolFixture) waitForConnections(t *testing.T, n int) {
 	want := `{"connections":` + strconv.Itoa(n) + `}`
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		_, body := f.get(t, "/apps/"+serverAppID+"/connections")
+		_, body := f.get(t, "/apps/"+protocolAppID+"/connections")
 		if strings.TrimSpace(string(body)) == want {
 			return
 		}
@@ -221,7 +332,7 @@ func protocolSend(t *testing.T, conn *ws.Conn, frame string) {
 // test of its own: the client asked about a name with no tenant in it and
 // is answered about the same name, and one frame built the wrong way anywhere in
 // protocol.go fails here.
-func protocolNext(t *testing.T, conn *ws.Conn) joaju.Frame {
+func protocolNext(t *testing.T, conn *ws.Conn) pusher.Frame {
 	t.Helper()
 
 	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
@@ -233,7 +344,7 @@ func protocolNext(t *testing.T, conn *ws.Conn) joaju.Frame {
 		t.Fatalf("a frame reached the wire carrying the tenant: %s", message)
 	}
 
-	f, err := joaju.Decode(message)
+	f, err := pusher.Decode(message)
 	if err != nil {
 		t.Fatalf("the server wrote something that is not a frame: %v (%s)", err, message)
 	}
@@ -242,7 +353,7 @@ func protocolNext(t *testing.T, conn *ws.Conn) joaju.Frame {
 }
 
 // protocolRefusal reads one pusher:error and answers what it says.
-func protocolRefusal(t *testing.T, conn *ws.Conn) (joaju.ErrorCode, string) {
+func protocolRefusal(t *testing.T, conn *ws.Conn) (pusher.ErrorCode, string) {
 	t.Helper()
 
 	f := protocolNext(t, conn)
@@ -251,8 +362,8 @@ func protocolRefusal(t *testing.T, conn *ws.Conn) (joaju.ErrorCode, string) {
 	}
 
 	var payload struct {
-		Code    joaju.ErrorCode `json:"code"`
-		Message string          `json:"message"`
+		Code    pusher.ErrorCode `json:"code"`
+		Message string           `json:"message"`
 	}
 	if err := json.Unmarshal(f.Data, &payload); err != nil {
 		t.Fatalf("decoding the refusal %s = %v", f.Data, err)
@@ -294,7 +405,7 @@ func protocolSilence(t *testing.T, conn *ws.Conn) {
 }
 
 // subscribe sends one subscription and reads its confirmation.
-func protocolSubscribe(t *testing.T, conn *ws.Conn, channel string) joaju.Frame {
+func protocolSubscribe(t *testing.T, conn *ws.Conn, channel string) pusher.Frame {
 	t.Helper()
 
 	protocolSend(t, conn, `{"event":"pusher:subscribe","data":{"channel":"`+channel+`"}}`)
@@ -314,7 +425,7 @@ func TestNewPusherRefusesAWiringItCannotServe(t *testing.T) {
 		subscribe joaju.SubscriptionPolicy
 	}{
 		{"no broker", nil, &protocolPolicy{}},
-		{"no subscription policy", joaju.NewMemoryBroker(), nil},
+		{"no subscription policy", pusher.NewMemoryBroker(), nil},
 	} {
 		t.Run(one.name, func(t *testing.T) {
 			defer func() {
@@ -323,7 +434,7 @@ func TestNewPusherRefusesAWiringItCannotServe(t *testing.T) {
 				}
 			}()
 
-			joaju.NewPusher(one.broker, one.subscribe, joaju.PusherConfig{})
+			pusher.NewPusher(one.broker, one.subscribe, pusher.PusherConfig{})
 		})
 	}
 }
@@ -336,16 +447,16 @@ func TestNewPusherRefusesAWiringItCannotServe(t *testing.T) {
 // asks for the bytes rather than building them, and this is the only place that
 // answer is written down.
 func TestPusherRendersTheServersOwnRefusals(t *testing.T) {
-	protocol := joaju.NewPusher(joaju.NewMemoryBroker(), &protocolPolicy{}, joaju.PusherConfig{})
+	protocol := pusher.NewPusher(pusher.NewMemoryBroker(), &protocolPolicy{}, pusher.PusherConfig{})
 
 	for _, one := range []struct {
 		name    string
 		refusal joaju.Refusal
-		want    joaju.ProtocolError
+		want    pusher.ProtocolError
 	}{
-		{"over quota", joaju.RefusalOverQuota, joaju.ErrOverQuota},
-		{"rate limited", joaju.RefusalRateLimited, joaju.ErrRateLimited},
-		{"unreadable", joaju.RefusalUnreadable, joaju.ErrInvalidMessage},
+		{"over quota", joaju.RefusalOverQuota, pusher.ErrOverQuota},
+		{"rate limited", joaju.RefusalRateLimited, pusher.ErrRateLimited},
+		{"unreadable", joaju.RefusalUnreadable, pusher.ErrInvalidMessage},
 	} {
 		t.Run(one.name, func(t *testing.T) {
 			if got, want := string(protocol.Refuse(one.refusal)), encode(t, one.want.Frame()); got != want {
@@ -358,7 +469,7 @@ func TestPusherRendersTheServersOwnRefusals(t *testing.T) {
 // A refusal this protocol has no code for is written as nothing, rather than as
 // a code that would tell the client something untrue about why.
 func TestPusherRefusesNothingItHasNoCodeFor(t *testing.T) {
-	protocol := joaju.NewPusher(joaju.NewMemoryBroker(), &protocolPolicy{}, joaju.PusherConfig{})
+	protocol := pusher.NewPusher(pusher.NewMemoryBroker(), &protocolPolicy{}, pusher.PusherConfig{})
 
 	if got := protocol.Refuse(joaju.Refusal(200)); got != nil {
 		t.Fatalf("Refuse() of an unknown refusal = %s, want nothing", got)
@@ -366,7 +477,7 @@ func TestPusherRefusesNothingItHasNoCodeFor(t *testing.T) {
 }
 
 func TestPusherEstablishesTheConnectionWithTheSocketIDAndTheActivityTimeout(t *testing.T) {
-	f := newProtocolFixture(t, joaju.PusherConfig{ActivityTimeout: 30 * time.Second})
+	f := newProtocolFixture(t, pusher.PusherConfig{ActivityTimeout: 30 * time.Second})
 
 	conn, _, err := f.dial(t, "http://"+f.host(t))
 	if err != nil {
@@ -398,7 +509,7 @@ func TestPusherEstablishesTheConnectionWithTheSocketIDAndTheActivityTimeout(t *t
 // for reads, and [joaju.ChannelType.Guarded] says whether a policy may allow a
 // subscription freely -- never whether one is asked.
 func TestPusherAsksThePolicyAboutAPublicChannelToo(t *testing.T) {
-	f := newProtocolFixture(t, joaju.PusherConfig{})
+	f := newProtocolFixture(t, pusher.PusherConfig{})
 	conn, _ := f.open(t)
 
 	confirmation := protocolSubscribe(t, conn, "orders.17")
@@ -425,7 +536,7 @@ func TestPusherAsksThePolicyAboutAPublicChannelToo(t *testing.T) {
 // beside the bytes it was computed over. A policy handed a re-encoded
 // channel_data is a policy hashing something the application never signed.
 func TestPusherShowsThePolicyTheSignatureAndTheBytesItCovers(t *testing.T) {
-	f := newProtocolFixture(t, joaju.PusherConfig{})
+	f := newProtocolFixture(t, pusher.PusherConfig{})
 	conn, _ := f.open(t)
 
 	const (
@@ -460,7 +571,7 @@ func TestPusherShowsThePolicyTheSignatureAndTheBytesItCovers(t *testing.T) {
 // that sends no signature is asked about with none: an empty field is what a
 // policy reads as "this browser offered nothing".
 func TestPusherShowsThePolicyNoSignatureWhenTheClientSentNone(t *testing.T) {
-	f := newProtocolFixture(t, joaju.PusherConfig{})
+	f := newProtocolFixture(t, pusher.PusherConfig{})
 	conn, _ := f.open(t)
 
 	protocolSubscribe(t, conn, "orders.17")
@@ -475,7 +586,7 @@ func TestPusherShowsThePolicyNoSignatureWhenTheClientSentNone(t *testing.T) {
 }
 
 func TestPusherRefusesASubscriptionThePolicyRefusesAndKeepsTheSocket(t *testing.T) {
-	f := newProtocolFixture(t, joaju.PusherConfig{})
+	f := newProtocolFixture(t, pusher.PusherConfig{})
 	f.policy.deny = func(s joaju.Subscription) error {
 		if strings.HasPrefix(s.Channel.Requested(), "private-") {
 			return errors.New("subject u1 does not own order 17")
@@ -488,8 +599,8 @@ func TestPusherRefusesASubscriptionThePolicyRefusesAndKeepsTheSocket(t *testing.
 
 	protocolSend(t, conn, `{"event":"pusher:subscribe","data":{"channel":"private-orders.17"}}`)
 	code, message := protocolRefusal(t, conn)
-	if code != joaju.CodeUnauthorized {
-		t.Fatalf("a refused subscription answered %d, want %d", code, joaju.CodeUnauthorized)
+	if code != pusher.CodeUnauthorized {
+		t.Fatalf("a refused subscription answered %d, want %d", code, pusher.CodeUnauthorized)
 	}
 	if strings.Contains(message, "order 17") || strings.Contains(message, "u1") {
 		t.Fatalf("the refusal disclosed the policy's reason: %q", message)
@@ -504,17 +615,17 @@ func TestPusherRefusesASubscriptionThePolicyRefusesAndKeepsTheSocket(t *testing.
 }
 
 func TestPusherKeepsTheChannelsItHasAfterARefusedFrame(t *testing.T) {
-	f := newProtocolFixture(t, joaju.PusherConfig{})
+	f := newProtocolFixture(t, pusher.PusherConfig{})
 	conn, _ := f.open(t)
 
 	protocolSubscribe(t, conn, "orders.17")
 
 	protocolSend(t, conn, `{"event":"pusher:nonsense"}`)
-	if code, _ := protocolRefusal(t, conn); code != joaju.CodeInvalidMessage {
-		t.Fatalf("an unknown event answered %d, want %d", code, joaju.CodeInvalidMessage)
+	if code, _ := protocolRefusal(t, conn); code != pusher.CodeInvalidMessage {
+		t.Fatalf("an unknown event answered %d, want %d", code, pusher.CodeInvalidMessage)
 	}
 
-	if status, body := f.post(t, "/apps/"+serverAppID+"/events",
+	if status, body := f.post(t, "/apps/"+protocolAppID+"/events",
 		`{"name":"OrderShipped","channel":"orders.17","data":"{\"id\":17}"}`); status != http.StatusOK {
 		t.Fatalf("publishing answered %d: %s", status, body)
 	}
@@ -532,7 +643,7 @@ func TestPusherKeepsTheChannelsItHasAfterARefusedFrame(t *testing.T) {
 // client able to send pusher_internal:member_added is a client able to invent
 // the members of a presence channel it is on.
 func TestPusherRefusesWhatOnlyTheServerMaySend(t *testing.T) {
-	f := newProtocolFixture(t, joaju.PusherConfig{})
+	f := newProtocolFixture(t, pusher.PusherConfig{})
 	conn, _ := f.open(t)
 
 	for _, frame := range []string{
@@ -542,8 +653,8 @@ func TestPusherRefusesWhatOnlyTheServerMaySend(t *testing.T) {
 		`{`,
 	} {
 		protocolSend(t, conn, frame)
-		if code, _ := protocolRefusal(t, conn); code != joaju.CodeInvalidMessage {
-			t.Fatalf("%s answered %d, want %d", frame, code, joaju.CodeInvalidMessage)
+		if code, _ := protocolRefusal(t, conn); code != pusher.CodeInvalidMessage {
+			t.Fatalf("%s answered %d, want %d", frame, code, pusher.CodeInvalidMessage)
 		}
 	}
 
@@ -554,12 +665,12 @@ func TestPusherRefusesWhatOnlyTheServerMaySend(t *testing.T) {
 }
 
 func TestPusherRefusesAChannelNameThatCarriesATenant(t *testing.T) {
-	f := newProtocolFixture(t, joaju.PusherConfig{})
+	f := newProtocolFixture(t, pusher.PusherConfig{})
 	conn, _ := f.open(t)
 
 	protocolSend(t, conn, `{"event":"pusher:subscribe","data":{"channel":"`+tenant+`:private-orders.17"}}`)
-	if code, _ := protocolRefusal(t, conn); code != joaju.CodeInvalidMessage {
-		t.Fatalf("a channel name carrying a tenant answered %d, want %d: naming a tenant is choosing whose events you hear", code, joaju.CodeInvalidMessage)
+	if code, _ := protocolRefusal(t, conn); code != pusher.CodeInvalidMessage {
+		t.Fatalf("a channel name carrying a tenant answered %d, want %d: naming a tenant is choosing whose events you hear", code, pusher.CodeInvalidMessage)
 	}
 	if asked := f.policy.seen(); len(asked) != 0 {
 		t.Fatalf("the policy was asked about %v, want nothing: the name was refused before it existed", asked)
@@ -569,7 +680,7 @@ func TestPusherRefusesAChannelNameThatCarriesATenant(t *testing.T) {
 // The name limits over a real socket: what a client sends is what a client is
 // refused for, and the socket it was refused on is still usable.
 func TestPusherRefusesAChannelNameOutsideWhatTheProtocolCarries(t *testing.T) {
-	f := newProtocolFixture(t, joaju.PusherConfig{})
+	f := newProtocolFixture(t, pusher.PusherConfig{})
 	conn, _ := f.open(t)
 
 	// A name that fills the frame, which is what a client could send before the
@@ -581,8 +692,8 @@ func TestPusherRefusesAChannelNameOutsideWhatTheProtocolCarries(t *testing.T) {
 		"private-#internal",
 	} {
 		protocolSend(t, conn, `{"event":"pusher:subscribe","data":{"channel":"`+requested+`"}}`)
-		if code, _ := protocolRefusal(t, conn); code != joaju.CodeInvalidMessage {
-			t.Fatalf("a channel name of %d bytes answered %d, want %d", len(requested), code, joaju.CodeInvalidMessage)
+		if code, _ := protocolRefusal(t, conn); code != pusher.CodeInvalidMessage {
+			t.Fatalf("a channel name of %d bytes answered %d, want %d", len(requested), code, pusher.CodeInvalidMessage)
 		}
 	}
 	if asked := f.policy.seen(); len(asked) != 0 {
@@ -597,7 +708,7 @@ func TestPusherRefusesAChannelNameOutsideWhatTheProtocolCarries(t *testing.T) {
 // The ceiling on how many channels one socket may be on, which is what stands
 // between one authorized client and a record that only grows.
 func TestPusherRefusesASubscriptionPastTheSocketsChannelLimit(t *testing.T) {
-	f := newProtocolFixture(t, joaju.PusherConfig{MaxChannelsPerConnection: 3})
+	f := newProtocolFixture(t, pusher.PusherConfig{MaxChannelsPerConnection: 3})
 	conn, _ := f.open(t)
 
 	for i := range 3 {
@@ -605,8 +716,8 @@ func TestPusherRefusesASubscriptionPastTheSocketsChannelLimit(t *testing.T) {
 	}
 
 	protocolSend(t, conn, `{"event":"pusher:subscribe","data":{"channel":"orders.3"}}`)
-	if code, _ := protocolRefusal(t, conn); code != joaju.CodeRateLimited {
-		t.Fatalf("a fourth subscription on a socket that may be on three answered %d, want %d", code, joaju.CodeRateLimited)
+	if code, _ := protocolRefusal(t, conn); code != pusher.CodeRateLimited {
+		t.Fatalf("a fourth subscription on a socket that may be on three answered %d, want %d", code, pusher.CodeRateLimited)
 	}
 	// Nothing was asked about it. The limit is this process's, so a
 	// subscription that cannot happen is one no policy is made to weigh.
@@ -630,15 +741,15 @@ func TestPusherRefusesASubscriptionPastTheSocketsChannelLimit(t *testing.T) {
 // The limit is one socket's, so a customer's other tabs are untouched by the tab
 // that reached it.
 func TestPusherCountsChannelsPerSocketAndNotPerTenant(t *testing.T) {
-	f := newProtocolFixture(t, joaju.PusherConfig{MaxChannelsPerConnection: 2})
+	f := newProtocolFixture(t, pusher.PusherConfig{MaxChannelsPerConnection: 2})
 	full, _ := f.open(t)
 	other, _ := f.open(t)
 
 	protocolSubscribe(t, full, "orders.0")
 	protocolSubscribe(t, full, "orders.1")
 	protocolSend(t, full, `{"event":"pusher:subscribe","data":{"channel":"orders.2"}}`)
-	if code, _ := protocolRefusal(t, full); code != joaju.CodeRateLimited {
-		t.Fatalf("the third subscription answered %d, want %d", code, joaju.CodeRateLimited)
+	if code, _ := protocolRefusal(t, full); code != pusher.CodeRateLimited {
+		t.Fatalf("the third subscription answered %d, want %d", code, pusher.CodeRateLimited)
 	}
 
 	// The same names, from the same tenant, on another socket.
@@ -648,27 +759,27 @@ func TestPusherCountsChannelsPerSocketAndNotPerTenant(t *testing.T) {
 
 // The number a deployment gets without asking, and the way to say it wants none.
 func TestPusherHoldsASocketToTheDefaultChannelLimitUnlessToldOtherwise(t *testing.T) {
-	f := newProtocolFixture(t, joaju.PusherConfig{})
+	f := newProtocolFixture(t, pusher.PusherConfig{})
 	conn, _ := f.open(t)
 
-	for i := range joaju.DefaultMaxChannelsPerConnection {
+	for i := range pusher.DefaultMaxChannelsPerConnection {
 		protocolSubscribe(t, conn, "orders."+strconv.Itoa(i))
 	}
-	protocolSend(t, conn, `{"event":"pusher:subscribe","data":{"channel":"orders.`+strconv.Itoa(joaju.DefaultMaxChannelsPerConnection)+`"}}`)
-	if code, _ := protocolRefusal(t, conn); code != joaju.CodeRateLimited {
+	protocolSend(t, conn, `{"event":"pusher:subscribe","data":{"channel":"orders.`+strconv.Itoa(pusher.DefaultMaxChannelsPerConnection)+`"}}`)
+	if code, _ := protocolRefusal(t, conn); code != pusher.CodeRateLimited {
 		t.Fatalf("subscription %d on a socket built with no limit configured answered %d, want %d: zero means the default and not no limit at all",
-			joaju.DefaultMaxChannelsPerConnection+1, code, joaju.CodeRateLimited)
+			pusher.DefaultMaxChannelsPerConnection+1, code, pusher.CodeRateLimited)
 	}
 
-	unlimited := newProtocolFixture(t, joaju.PusherConfig{MaxChannelsPerConnection: -1})
+	unlimited := newProtocolFixture(t, pusher.PusherConfig{MaxChannelsPerConnection: -1})
 	free, _ := unlimited.open(t)
-	for i := range joaju.DefaultMaxChannelsPerConnection + 1 {
+	for i := range pusher.DefaultMaxChannelsPerConnection + 1 {
 		protocolSubscribe(t, free, "orders."+strconv.Itoa(i))
 	}
 }
 
 func TestPusherAnswersAPingAndSaysNothingToAPong(t *testing.T) {
-	f := newProtocolFixture(t, joaju.PusherConfig{})
+	f := newProtocolFixture(t, pusher.PusherConfig{})
 	conn, _ := f.open(t)
 
 	protocolBarrier(t, conn)
@@ -682,7 +793,7 @@ func TestPusherAnswersAPingAndSaysNothingToAPong(t *testing.T) {
 // The presence channel end to end: the list a subscriber is given includes
 // itself, the others are told it arrived, and they are told when it goes.
 func TestPusherPublishesTheMembersOfAPresenceChannelToEachOther(t *testing.T) {
-	f := newProtocolFixture(t, joaju.PusherConfig{})
+	f := newProtocolFixture(t, pusher.PusherConfig{})
 
 	first, _ := f.open(t)
 	protocolSend(t, first, `{"event":"pusher:subscribe","data":{"channel":"presence-room.1","channel_data":"{\"user_id\":\"u1\",\"user_info\":{\"name\":\"Ana\"}}"}}`)
@@ -731,7 +842,7 @@ func TestPusherPublishesTheMembersOfAPresenceChannelToEachOther(t *testing.T) {
 
 // protocolMembers is the ids in the presence block of a subscription
 // confirmation.
-func protocolMembers(t *testing.T, f joaju.Frame) []string {
+func protocolMembers(t *testing.T, f pusher.Frame) []string {
 	t.Helper()
 
 	var payload struct {
@@ -753,7 +864,7 @@ func protocolMembers(t *testing.T, f joaju.Frame) []string {
 // A cache channel says out loud that it has nothing yet, and replays what it has
 // to whoever arrives next.
 func TestPusherReplaysACacheChannelAndSaysWhenThereIsNothingToReplay(t *testing.T) {
-	f := newProtocolFixture(t, joaju.PusherConfig{})
+	f := newProtocolFixture(t, pusher.PusherConfig{})
 
 	first, _ := f.open(t)
 	protocolSend(t, first, `{"event":"pusher:subscribe","data":{"channel":"cache-prices"}}`)
@@ -762,14 +873,14 @@ func TestPusherReplaysACacheChannelAndSaysWhenThereIsNothingToReplay(t *testing.
 	// the miss arrives first. A client that bound its handlers before
 	// subscribing -- which is how a client subscribes -- reads both.
 	missed := protocolNext(t, first)
-	if missed.Event != joaju.EventCacheMiss || missed.Channel != "cache-prices" {
-		t.Fatalf("the first subscriber was told %+v, want %s", missed, joaju.EventCacheMiss)
+	if missed.Event != pusher.EventCacheMiss || missed.Channel != "cache-prices" {
+		t.Fatalf("the first subscriber was told %+v, want %s", missed, pusher.EventCacheMiss)
 	}
 	if confirmation := protocolNext(t, first); confirmation.Event != joaju.EventSubscriptionSucceeded {
 		t.Fatalf("after the miss came %s, want %s", confirmation.Event, joaju.EventSubscriptionSucceeded)
 	}
 
-	if status, body := f.post(t, "/apps/"+serverAppID+"/events",
+	if status, body := f.post(t, "/apps/"+protocolAppID+"/events",
 		`{"name":"prices.updated","channel":"cache-prices","data":"{\"eur\":1}"}`); status != http.StatusOK {
 		t.Fatalf("publishing answered %d: %s", status, body)
 	}
@@ -795,13 +906,13 @@ func TestPusherReplaysACacheChannelAndSaysWhenThereIsNothingToReplay(t *testing.
 // The same replay on the channel whose prefix has the encryption in the middle
 // of it, which is the one a server that reads only "private-cache-" leaves out.
 func TestPusherReplaysAnEncryptedPrivateCacheChannel(t *testing.T) {
-	f := newProtocolFixture(t, joaju.PusherConfig{})
+	f := newProtocolFixture(t, pusher.PusherConfig{})
 	const channel = joaju.EncryptedPrivateCacheChannelPrefix + "prices"
 
 	first, _ := f.open(t)
 	protocolSend(t, first, `{"event":"pusher:subscribe","data":{"channel":"`+channel+`"}}`)
-	if missed := protocolNext(t, first); missed.Event != joaju.EventCacheMiss || missed.Channel != channel {
-		t.Fatalf("the first subscriber was told %+v, want %s", missed, joaju.EventCacheMiss)
+	if missed := protocolNext(t, first); missed.Event != pusher.EventCacheMiss || missed.Channel != channel {
+		t.Fatalf("the first subscriber was told %+v, want %s", missed, pusher.EventCacheMiss)
 	}
 	if confirmation := protocolNext(t, first); confirmation.Event != joaju.EventSubscriptionSucceeded {
 		t.Fatalf("after the miss came %s, want %s", confirmation.Event, joaju.EventSubscriptionSucceeded)
@@ -809,7 +920,7 @@ func TestPusherReplaysAnEncryptedPrivateCacheChannel(t *testing.T) {
 
 	// A payload the subscribers encrypted among themselves, which this server
 	// holds and replays as the bytes it was handed.
-	if status, body := f.post(t, "/apps/"+serverAppID+"/events",
+	if status, body := f.post(t, "/apps/"+protocolAppID+"/events",
 		`{"name":"prices.updated","channel":"`+channel+`","data":"{\"ciphertext\":\"ZW5jcnlwdGVk\"}"}`); status != http.StatusOK {
 		t.Fatalf("publishing answered %d: %s", status, body)
 	}
@@ -826,39 +937,39 @@ func TestPusherReplaysAnEncryptedPrivateCacheChannel(t *testing.T) {
 }
 
 func TestPusherRefusesAClientEventWhenTheyAreOff(t *testing.T) {
-	f := newProtocolFixture(t, joaju.PusherConfig{})
+	f := newProtocolFixture(t, pusher.PusherConfig{})
 	conn, _ := f.open(t)
 
 	protocolSubscribe(t, conn, "private-room.1")
 
 	protocolSend(t, conn, `{"event":"client-typing","channel":"private-room.1","data":"{\"at\":1}"}`)
 	code, message := protocolRefusal(t, conn)
-	if code != joaju.CodeRateLimited {
-		t.Fatalf("a client event on a server that does not relay them answered %d, want %d", code, joaju.CodeRateLimited)
+	if code != pusher.CodeRateLimited {
+		t.Fatalf("a client event on a server that does not relay them answered %d, want %d", code, pusher.CodeRateLimited)
 	}
-	if message != joaju.ErrClientEventsDisabled.Message {
-		t.Fatalf("the refusal said %q, want %q", message, joaju.ErrClientEventsDisabled.Message)
+	if message != pusher.ErrClientEventsDisabled.Message {
+		t.Fatalf("the refusal said %q, want %q", message, pusher.ErrClientEventsDisabled.Message)
 	}
 }
 
 func TestPusherRefusesAClientEventOnAChannelNoPolicyGuarded(t *testing.T) {
-	f := newProtocolFixture(t, joaju.PusherConfig{ClientEvents: joaju.ClientEventsOn})
+	f := newProtocolFixture(t, pusher.PusherConfig{ClientEvents: pusher.ClientEventsOn})
 	conn, _ := f.open(t)
 
 	protocolSubscribe(t, conn, "room.1")
 
 	protocolSend(t, conn, `{"event":"client-typing","channel":"room.1","data":"{\"at\":1}"}`)
 	code, message := protocolRefusal(t, conn)
-	if code != joaju.CodeUnauthorized {
-		t.Fatalf("a client event on a public channel answered %d, want %d", code, joaju.CodeUnauthorized)
+	if code != pusher.CodeUnauthorized {
+		t.Fatalf("a client event on a public channel answered %d, want %d", code, pusher.CodeUnauthorized)
 	}
-	if message != joaju.ErrClientEventChannel.Message {
-		t.Fatalf("the refusal said %q, want %q", message, joaju.ErrClientEventChannel.Message)
+	if message != pusher.ErrClientEventChannel.Message {
+		t.Fatalf("the refusal said %q, want %q", message, pusher.ErrClientEventChannel.Message)
 	}
 }
 
 func TestPusherRefusesAClientEventFromSomebodyWhoIsNotOnTheChannel(t *testing.T) {
-	f := newProtocolFixture(t, joaju.PusherConfig{ClientEvents: joaju.ClientEventsOn})
+	f := newProtocolFixture(t, pusher.PusherConfig{ClientEvents: pusher.ClientEventsOn})
 
 	// Somebody is on the channel, so what is refused is this sender and not the
 	// absence of the channel.
@@ -869,11 +980,11 @@ func TestPusherRefusesAClientEventFromSomebodyWhoIsNotOnTheChannel(t *testing.T)
 	protocolSend(t, stranger, `{"event":"client-typing","channel":"private-room.1","data":"{\"at\":1}"}`)
 
 	code, message := protocolRefusal(t, stranger)
-	if code != joaju.CodeUnauthorized {
-		t.Fatalf("a client event from somebody not on the channel answered %d, want %d", code, joaju.CodeUnauthorized)
+	if code != pusher.CodeUnauthorized {
+		t.Fatalf("a client event from somebody not on the channel answered %d, want %d", code, pusher.CodeUnauthorized)
 	}
-	if message != joaju.ErrNotSubscribed.Message {
-		t.Fatalf("the refusal said %q, want %q", message, joaju.ErrNotSubscribed.Message)
+	if message != pusher.ErrNotSubscribed.Message {
+		t.Fatalf("the refusal said %q, want %q", message, pusher.ErrNotSubscribed.Message)
 	}
 
 	// And nothing was relayed to the people who are on it.
@@ -881,7 +992,7 @@ func TestPusherRefusesAClientEventFromSomebodyWhoIsNotOnTheChannel(t *testing.T)
 }
 
 func TestPusherRelaysAClientEventToTheOthersAndNotToTheSender(t *testing.T) {
-	f := newProtocolFixture(t, joaju.PusherConfig{ClientEvents: joaju.ClientEventsOn})
+	f := newProtocolFixture(t, pusher.PusherConfig{ClientEvents: pusher.ClientEventsOn})
 
 	sender, _ := f.open(t)
 	protocolSubscribe(t, sender, "private-room.1")
@@ -892,7 +1003,7 @@ func TestPusherRelaysAClientEventToTheOthersAndNotToTheSender(t *testing.T) {
 	protocolSend(t, sender, `{"event":"client-typing","channel":"private-room.1","data":"{\"at\":1}"}`)
 
 	// A private channel seats no member, so the frame carries no user_id at all
-	// -- not an empty one. [joaju.Encode] is the only thing that writes a frame
+	// -- not an empty one. [pusher.Encode] is the only thing that writes a frame
 	// and re-encoding what came off the wire reproduces it, so this is the
 	// bytes the other subscriber was sent.
 	relayed := protocolNext(t, other)
@@ -912,7 +1023,7 @@ func TestPusherRelaysAClientEventToTheOthersAndNotToTheSender(t *testing.T) {
 // out is the member the channel seated, which is the one a
 // [joaju.SubscriptionPolicy] was asked about.
 func TestPusherRelaysAClientEventOnAPresenceChannelWithTheSendersUserID(t *testing.T) {
-	f := newProtocolFixture(t, joaju.PusherConfig{ClientEvents: joaju.ClientEventsOn})
+	f := newProtocolFixture(t, pusher.PusherConfig{ClientEvents: pusher.ClientEventsOn})
 
 	other, _ := f.open(t)
 	protocolSend(t, other, `{"event":"pusher:subscribe","data":{"channel":"presence-room.1","channel_data":"{\"user_id\":\"u1\"}"}}`)
@@ -944,7 +1055,7 @@ func TestPusherRelaysAClientEventOnAPresenceChannelWithTheSendersUserID(t *testi
 }
 
 func TestPusherLeavesTheChannelWhenTheClientUnsubscribes(t *testing.T) {
-	f := newProtocolFixture(t, joaju.PusherConfig{})
+	f := newProtocolFixture(t, pusher.PusherConfig{})
 	conn, _ := f.open(t)
 
 	protocolSubscribe(t, conn, "orders.17")
@@ -953,7 +1064,7 @@ func TestPusherLeavesTheChannelWhenTheClientUnsubscribes(t *testing.T) {
 	// Nothing answers an unsubscribe, so the pong is what says it has happened.
 	protocolBarrier(t, conn)
 
-	if status, body := f.post(t, "/apps/"+serverAppID+"/events",
+	if status, body := f.post(t, "/apps/"+protocolAppID+"/events",
 		`{"name":"OrderShipped","channel":"orders.17","data":"{}"}`); status != http.StatusOK {
 		t.Fatalf("publishing answered %d: %s", status, body)
 	}
@@ -968,7 +1079,7 @@ func TestPusherLeavesTheChannelWhenTheClientUnsubscribes(t *testing.T) {
 		t.Fatalf("the observer was told of %v removed, want the one channel", removed)
 	}
 
-	status, body := f.get(t, "/apps/"+serverAppID+"/channels")
+	status, body := f.get(t, "/apps/"+protocolAppID+"/channels")
 	if status != http.StatusOK {
 		t.Fatalf("listing channels answered %d", status)
 	}
@@ -986,7 +1097,7 @@ func TestPusherLeavesTheChannelWhenTheClientUnsubscribes(t *testing.T) {
 // counts stays is a dashboard that drifts, one channel at a time, until it is
 // worth nothing.
 func TestPusherAnnouncesAChannelGoneOnlyWhenTheBrokerDroppedIt(t *testing.T) {
-	f := newProtocolFixture(t, joaju.PusherConfig{}, protocolKeepingBroker{joaju.NewMemoryBroker()})
+	f := newProtocolFixture(t, pusher.PusherConfig{}, protocolKeepingBroker{pusher.NewMemoryBroker()})
 	conn, _ := f.open(t)
 
 	protocolSubscribe(t, conn, "orders.17")
@@ -1006,7 +1117,7 @@ func TestPusherAnnouncesAChannelGoneOnlyWhenTheBrokerDroppedIt(t *testing.T) {
 // Unsubscribing from a channel a socket is not on is not an error: it is a
 // reconnect that raced its own cleanup.
 func TestPusherIgnoresAnUnsubscribeFromAChannelItIsNotOn(t *testing.T) {
-	f := newProtocolFixture(t, joaju.PusherConfig{})
+	f := newProtocolFixture(t, pusher.PusherConfig{})
 	conn, _ := f.open(t)
 
 	protocolSend(t, conn, `{"event":"pusher:unsubscribe","data":{"channel":"orders.17"}}`)
@@ -1018,7 +1129,7 @@ func TestPusherIgnoresAnUnsubscribeFromAChannelItIsNotOn(t *testing.T) {
 }
 
 func TestPusherTakesASocketOffItsChannelsWhenItCloses(t *testing.T) {
-	f := newProtocolFixture(t, joaju.PusherConfig{})
+	f := newProtocolFixture(t, pusher.PusherConfig{})
 	conn, _ := f.open(t)
 
 	protocolSubscribe(t, conn, "orders.17")
@@ -1029,7 +1140,7 @@ func TestPusherTakesASocketOffItsChannelsWhenItCloses(t *testing.T) {
 	f.observer.waitForRemoved(t, tenant+":orders.17")
 	f.observer.waitForRemoved(t, tenant+":invoices.9")
 
-	status, body := f.get(t, "/apps/"+serverAppID+"/channels")
+	status, body := f.get(t, "/apps/"+protocolAppID+"/channels")
 	if status != http.StatusOK {
 		t.Fatalf("listing channels answered %d", status)
 	}
@@ -1043,7 +1154,7 @@ func TestPusherTakesASocketOffItsChannelsWhenItCloses(t *testing.T) {
 // a count that goes up twice and down once is a dashboard that never returns to
 // zero.
 func TestPusherAnnouncesAChannelOnceHoweverManySocketsSubscribe(t *testing.T) {
-	f := newProtocolFixture(t, joaju.PusherConfig{})
+	f := newProtocolFixture(t, pusher.PusherConfig{})
 
 	first, _ := f.open(t)
 	protocolSubscribe(t, first, "orders.17")
@@ -1068,7 +1179,7 @@ func TestPusherAnnouncesAChannelOnceHoweverManySocketsSubscribe(t *testing.T) {
 	_ = second.Close()
 	f.waitForConnections(t, 1)
 
-	if status, body := f.post(t, "/apps/"+serverAppID+"/events",
+	if status, body := f.post(t, "/apps/"+protocolAppID+"/events",
 		`{"name":"OrderShipped","channel":"orders.17","data":"{}"}`); status != http.StatusOK {
 		t.Fatalf("publishing answered %d: %s", status, body)
 	}

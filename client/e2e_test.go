@@ -16,6 +16,7 @@ import (
 
 	"github.com/arandu-io/hesape/auth"
 	"github.com/arandu-io/joaju"
+	"github.com/arandu-io/joaju/protocols/pusher"
 )
 
 // The end to end tests: a real [joaju.Server] over a real socket, with the
@@ -67,7 +68,7 @@ func (e2eConnect) Can(context.Context, auth.Subject, auth.Action, joaju.Handshak
 // signature -- an application publishing an event is not a browser -- and a
 // policy that demanded a browser's evidence there would refuse every publish.
 //
-// The signature itself is not verified, and that is [joaju.SubscribeRequest]'s
+// The signature itself is not verified, and that is [pusher.SubscribeRequest]'s
 // own position for a mounted application: the subject on the Grant arrived
 // through the front door, so a signature that could also allow a subscription
 // would be a second mechanism for one decision.
@@ -224,15 +225,15 @@ type e2eServer struct {
 func newE2EServer(t *testing.T, activityTimeout time.Duration, swallowPing bool, subjects ...string) *e2eServer {
 	t.Helper()
 
-	broker := joaju.NewMemoryBroker()
+	broker := pusher.NewMemoryBroker()
 	subscribe := e2eSubscribe{}
 
 	// The same Broker reaches the protocol and the server, which is the wiring
 	// [joaju.NewServer] refuses to guess at.
 	protocol := &e2eProtocol{
-		Protocol: joaju.NewPusher(broker, subscribe, joaju.PusherConfig{
+		Protocol: pusher.NewPusher(broker, subscribe, pusher.PusherConfig{
 			ActivityTimeout: activityTimeout,
-			ClientEvents:    joaju.ClientEventsOn,
+			ClientEvents:    pusher.ClientEventsOn,
 		}),
 		swallowPing: swallowPing,
 	}

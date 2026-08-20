@@ -101,6 +101,15 @@
 // Every one of the seven that reads or writes channel state needs a Grant, and
 // [Broker] is why: there is no method on it that reaches a channel without one.
 //
+// # The protocol
+//
+// Subpackage protocols/pusher is the wire format: the frames, the codecs, the
+// channels, the in-memory Broker and the [Protocol] that answers a socket. It
+// imports this package and this package does not import it, which is what keeps
+// the two apart -- the server here owns the socket and knows no frame, and a
+// second protocol would be a second subpackage rather than a branch in this
+// one.
+//
 // # The transport
 //
 // Subpackage ws is this project's own implementation of RFC 6455, and it is why

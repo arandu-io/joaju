@@ -1,4 +1,4 @@
-package joaju
+package pusher
 
 import (
 	"context"
@@ -11,21 +11,22 @@ import (
 
 	"github.com/arandu-io/hesape/auth"
 	"github.com/arandu-io/hesape/broadcasting"
+	"github.com/arandu-io/joaju"
 )
 
-// This file is the [Channel] implementation, and there is one of it.
+// This file is the [joaju.Channel] implementation, and there is one of it.
 //
 // There are six kinds of channel and one type for them, because what actually
 // varies between the kinds is two booleans, and both are already on the name:
 //
-//	[ChannelType.Presence]  publish the subscribers to each other
-//	[ChannelType.Cache]     replay the last event to whoever subscribes next
+//	[joaju.ChannelType.Presence]  publish the subscribers to each other
+//	[joaju.ChannelType.Cache]     replay the last event to whoever subscribes next
 //
 // Six types would be six copies of the subscriber map, the lock, the delivery
 // loop and the tenant check, differing in those two booleans -- and the tenant
 // check is the one thing in this repository that may not exist in six copies,
 // because five of them would be right. So there is one type and it reads
-// [ChannelName.Type].
+// [joaju.ChannelName.Type].
 //
 // What is NOT in this file: the wire format, and the frames the server sends
 // around a subscription rather than through it.
@@ -33,35 +34,35 @@ import (
 // The frames are built by pusher.go -- [EventFrame], [MemberAdded],
 // [MemberRemoved], [CacheMiss] -- and encoded by [Encode]. A channel decides
 // who receives and pusher.go decides what the bytes look like, so the rule that
-// [ChannelName.Requested] goes out and [ChannelName.String] never does is
+// [joaju.ChannelName.Requested] goes out and [joaju.ChannelName.String] never does is
 // enforced in one function instead of in six.
 //
-// [EventSubscriptionSucceeded] carries [Channel.Data] and is the server
+// [joaju.EventSubscriptionSucceeded] carries [joaju.Channel.Data] and is the server
 // answering the client that asked -- the channel is not involved, and it has no
-// way to tell which frame is an answer to whom. [EventMemberAdded],
-// [EventMemberRemoved] and the cache replay are here, because those go to
+// way to tell which frame is an answer to whom. [joaju.EventMemberAdded],
+// [joaju.EventMemberRemoved] and the cache replay are here, because those go to
 // somebody other than the asker and the channel is what knows who.
 
-// NewChannel is the only way to a [Channel], and it makes the kind
-// [ChannelName.Type] names.
+// NewChannel is the only way to a [joaju.Channel], and it makes the kind
+// [joaju.ChannelName.Type] names.
 //
 // There is no argument that says which kind to build: the kind is in the name,
 // the name came from a Grant, and a caller who could ask for a public channel
-// under a private name would have found the way around [ChannelType.Guarded].
+// under a private name would have found the way around [joaju.ChannelType.Guarded].
 //
-// The zero [ChannelName] is refused. It is what a failed [NewChannelName] hands
+// The zero [joaju.ChannelName] is refused. It is what a failed [joaju.NewChannelName] hands
 // back, and a channel built from one would be a channel with no tenant.
-func NewChannel(name ChannelName) (Channel, error) {
+func NewChannel(name joaju.ChannelName) (joaju.Channel, error) {
 	if name.IsZero() {
 		return nil, errors.New("joaju: a channel needs a name, and the zero name is not one")
 	}
 
-	return &channel{name: name, subscribers: make(map[SocketID]Subscriber)}, nil
+	return &channel{name: name, subscribers: make(map[joaju.SocketID]joaju.Subscriber)}, nil
 }
 
 // channel is every kind of channel.
 //
-// It is safe for concurrent use, which [Channel] requires of an implementation:
+// It is safe for concurrent use, which [joaju.Channel] requires of an implementation:
 // one connection is one goroutine, and every one of them reaches the same
 // channel value.
 //
@@ -72,35 +73,35 @@ func NewChannel(name ChannelName) (Channel, error) {
 type channel struct {
 	// name is fixed at construction and carries the tenant, so it is read
 	// without the lock.
-	name ChannelName
+	name joaju.ChannelName
 
 	mu          sync.RWMutex
-	subscribers map[SocketID]Subscriber
+	subscribers map[joaju.SocketID]joaju.Subscriber
 	// cached is the last event broadcast on a cache channel, and cachedSet says
-	// whether there has been one. A zero [Event] is not distinguishable from an
+	// whether there has been one. A zero [joaju.Event] is not distinguishable from an
 	// unset one by looking at it, and "there has been no event yet" has to be
 	// answerable without guessing.
-	cached    Event
+	cached    joaju.Event
 	cachedSet bool
 }
 
 // Name is the channel's name, tenant included.
-func (c *channel) Name() ChannelName { return c.name }
+func (c *channel) Name() joaju.ChannelName { return c.name }
 
 // Connections is every current subscriber, ordered by socket id.
 //
 // The order is not the protocol's business and no client sees it; it is sorted
 // because the map is not ordered, and a metrics route that lists the same
 // sockets in a different order on every request is a route nobody can diff.
-func (c *channel) Connections() []Subscriber {
+func (c *channel) Connections() []joaju.Subscriber {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
-	subscribers := make([]Subscriber, 0, len(c.subscribers))
+	subscribers := make([]joaju.Subscriber, 0, len(c.subscribers))
 	for _, s := range c.subscribers {
 		subscribers = append(subscribers, s)
 	}
-	slices.SortFunc(subscribers, func(a, b Subscriber) int {
+	slices.SortFunc(subscribers, func(a, b joaju.Subscriber) int {
 		return strings.Compare(string(a.Conn.ID()), string(b.Conn.ID()))
 	})
 
@@ -108,7 +109,7 @@ func (c *channel) Connections() []Subscriber {
 }
 
 // Find is the subscriber with this socket id, if it is on this channel.
-func (c *channel) Find(id SocketID) (Subscriber, bool) {
+func (c *channel) Find(id joaju.SocketID) (joaju.Subscriber, bool) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
@@ -118,7 +119,7 @@ func (c *channel) Find(id SocketID) (Subscriber, bool) {
 }
 
 // Subscribed reports whether this connection is on this channel.
-func (c *channel) Subscribed(conn *Connection) bool {
+func (c *channel) Subscribed(conn *joaju.Connection) bool {
 	if conn == nil {
 		return false
 	}
@@ -133,15 +134,15 @@ func (c *channel) Subscribed(conn *Connection) bool {
 // of what they protect:
 //
 //   - the Grant was issued for broadcasting.ChannelJoin, so a
-//     [SubscriptionPolicy] answered about this subscription and not something
+//     [joaju.SubscriptionPolicy] answered about this subscription and not something
 //     else. Subscribing is a read, and a read with no policy behind it is data
 //     nobody decided anyone could have;
 //   - the Grant's tenant is the channel's tenant. The tenant is already in the
-//     name -- [NewChannelName] put it there off a Grant -- so this catches the
+//     name -- [joaju.NewChannelName] put it there off a Grant -- so this catches the
 //     one case that construction cannot: a name built under one Grant, carried
 //     to another;
 //   - the connection's tenant is the channel's tenant. The socket's tenant came
-//     off the socket's own Grant at [NewConnection], and a subscription is two
+//     off the socket's own Grant at [joaju.NewConnection], and a subscription is two
 //     Grants meeting. Without this line a Grant for the right tenant would seat
 //     a socket belonging to another one, and every event on the channel would
 //     be delivered to it;
@@ -149,7 +150,7 @@ func (c *channel) Subscribed(conn *Connection) bool {
 //     answered about one person does not seat another.
 //
 // On a presence channel the member is required and announced to the others with
-// [EventMemberAdded]; off one it is discarded, because a channel that is not a
+// [joaju.EventMemberAdded]; off one it is discarded, because a channel that is not a
 // presence channel publishes nothing about who is listening. On a cache channel
 // the last event is replayed to the new subscriber and to nobody else, or
 // [EventCacheMiss] is sent when there has not been one.
@@ -163,7 +164,7 @@ func (c *channel) Subscribed(conn *Connection) bool {
 // socket is on the channel, and a subscriber whose socket has since died does
 // not undo that. The caller logs it; the reader loop is what removes a dead
 // socket.
-func (c *channel) Subscribe(ctx context.Context, g auth.Grant, conn *Connection, member Member) error {
+func (c *channel) Subscribe(ctx context.Context, g auth.Grant, conn *joaju.Connection, member joaju.Member) error {
 	if conn == nil {
 		return errors.New("joaju: a subscription needs a connection")
 	}
@@ -172,11 +173,11 @@ func (c *channel) Subscribe(ctx context.Context, g auth.Grant, conn *Connection,
 	}
 	if auth.Tenant(g) != c.name.Tenant() {
 		return fmt.Errorf("%w: the grant is for %q and the channel belongs to %q",
-			ErrWrongTenant, auth.Tenant(g), c.name.Tenant())
+			joaju.ErrWrongTenant, auth.Tenant(g), c.name.Tenant())
 	}
 	if conn.Tenant() != c.name.Tenant() {
 		return fmt.Errorf("%w: socket %s belongs to %q and the channel belongs to %q",
-			ErrWrongTenant, conn.ID(), conn.Tenant(), c.name.Tenant())
+			joaju.ErrWrongTenant, conn.ID(), conn.Tenant(), c.name.Tenant())
 	}
 	if g.Subject().ID != conn.Subject().ID {
 		return fmt.Errorf("%w: joaju: the grant authorizes %q and socket %s is held by %q",
@@ -189,14 +190,14 @@ func (c *channel) Subscribe(ctx context.Context, g auth.Grant, conn *Connection,
 			return fmt.Errorf("joaju: %s is a presence channel and the subscription names no member", c.name.Requested())
 		}
 	} else {
-		member = Member{}
+		member = joaju.Member{}
 	}
 
 	c.mu.Lock()
 	_, seated := c.subscribers[conn.ID()]
 	announce := presence && !seated && !c.holds(member.UserID)
-	c.subscribers[conn.ID()] = Subscriber{Conn: conn, Member: member}
-	var others []Subscriber
+	c.subscribers[conn.ID()] = joaju.Subscriber{Conn: conn, Member: member}
+	var others []joaju.Subscriber
 	if announce {
 		others = c.gather(conn.ID())
 	}
@@ -207,7 +208,7 @@ func (c *channel) Subscribe(ctx context.Context, g auth.Grant, conn *Connection,
 		return nil
 	}
 
-	arrived := []Subscriber{{Conn: conn, Member: member}}
+	arrived := []joaju.Subscriber{{Conn: conn, Member: member}}
 
 	var errs []error
 	if announce {
@@ -232,11 +233,11 @@ func (c *channel) Subscribe(ctx context.Context, g auth.Grant, conn *Connection,
 
 // Unsubscribe removes a connection from the channel.
 //
-// It takes no Grant, which [Channel] says and this repeats because it looks
+// It takes no Grant, which [joaju.Channel] says and this repeats because it looks
 // like an omission: leaving discloses nothing, and a socket that has already
 // dropped has nobody left to ask.
 //
-// On a presence channel the departure is announced with [EventMemberRemoved],
+// On a presence channel the departure is announced with [joaju.EventMemberRemoved],
 // and only when the member has no other socket left on the channel. One person
 // with two tabs who closes one has not left, and telling the others they did
 // would empty them out of a member list they are still in.
@@ -244,7 +245,7 @@ func (c *channel) Subscribe(ctx context.Context, g auth.Grant, conn *Connection,
 // Removing a socket that is not on the channel is not an error. The reader loop
 // calls this when a socket dies, and it does not know which channels the socket
 // had reached.
-func (c *channel) Unsubscribe(ctx context.Context, conn *Connection) error {
+func (c *channel) Unsubscribe(ctx context.Context, conn *joaju.Connection) error {
 	if conn == nil {
 		return errors.New("joaju: unsubscribing needs a connection")
 	}
@@ -258,7 +259,7 @@ func (c *channel) Unsubscribe(ctx context.Context, conn *Connection) error {
 	}
 	delete(c.subscribers, conn.ID())
 	announce := c.name.Type().Presence() && !c.holds(gone.Member.UserID)
-	var remaining []Subscriber
+	var remaining []joaju.Subscriber
 	if announce {
 		remaining = c.gather("")
 	}
@@ -274,17 +275,17 @@ func (c *channel) Unsubscribe(ctx context.Context, conn *Connection) error {
 }
 
 // Broadcast delivers the event to every subscriber except the one that sent it,
-// which is [Event.Socket].
-func (c *channel) Broadcast(ctx context.Context, e Event) error {
+// which is [joaju.Event.Socket].
+func (c *channel) Broadcast(ctx context.Context, e joaju.Event) error {
 	return c.send(ctx, e, e.Socket)
 }
 
 // BroadcastToAll delivers the event to every subscriber, the sender included.
-func (c *channel) BroadcastToAll(ctx context.Context, e Event) error {
+func (c *channel) BroadcastToAll(ctx context.Context, e joaju.Event) error {
 	return c.send(ctx, e, "")
 }
 
-// Data is what [EventSubscriptionSucceeded] carries to a new subscriber.
+// Data is what [joaju.EventSubscriptionSucceeded] carries to a new subscriber.
 //
 // It is the protocol's presence block, and it is empty off a presence channel:
 //
@@ -297,7 +298,7 @@ func (c *channel) BroadcastToAll(ctx context.Context, e Event) error {
 // The ids are sorted, for the same reason [channel.Connections] is.
 //
 // Every member in it is a member of this channel, and this channel has one
-// tenant: it was in [Channel.Name] before the first subscriber, and
+// tenant: it was in [joaju.Channel.Name] before the first subscriber, and
 // [channel.Subscribe] refuses a socket or a Grant from any other. There is no
 // filtering to do here, and that is the point -- a member list that had to be
 // filtered would be a member list that could be forgotten.
@@ -339,9 +340,9 @@ func (c *channel) Data() map[string]any {
 // receive -- the sender for [channel.Broadcast], nobody for
 // [channel.BroadcastToAll].
 //
-// The empty socket id skips nothing, because [NewConnection] refuses a
+// The empty socket id skips nothing, because [joaju.NewConnection] refuses a
 // connection without one.
-func (c *channel) send(ctx context.Context, e Event, skip SocketID) error {
+func (c *channel) send(ctx context.Context, e joaju.Event, skip joaju.SocketID) error {
 	if err := c.accepts(e); err != nil {
 		return err
 	}
@@ -353,7 +354,7 @@ func (c *channel) send(ctx context.Context, e Event, skip SocketID) error {
 	c.mu.Lock()
 	// A cache channel replays the last event so that a client arriving late
 	// sees the current state. The protocol's own traffic is not state:
-	// replaying [EventMemberAdded] would tell a new subscriber that somebody
+	// replaying [joaju.EventMemberAdded] would tell a new subscriber that somebody
 	// joined at a moment before they were listening.
 	if c.name.Type().Cache() && !f.IsProtocol() && !f.IsInternal() {
 		c.cached, c.cachedSet = e, true
@@ -366,19 +367,19 @@ func (c *channel) send(ctx context.Context, e Event, skip SocketID) error {
 
 // accepts refuses an event that is not this channel's.
 //
-// A tenant mismatch is [ErrWrongTenant] and is the one that matters: an event
+// A tenant mismatch is [joaju.ErrWrongTenant] and is the one that matters: an event
 // published on one customer's channel, handed to the channel of the same name
 // belonging to another, is delivered to every subscriber there. It cannot come
-// out of [NewChannelName], and it can come out of a lookup that matched on
-// [ChannelName.Requested] -- which is why the [Broker] holds channels under
-// [ChannelName.String] and why this compares both halves.
-func (c *channel) accepts(e Event) error {
+// out of [joaju.NewChannelName], and it can come out of a lookup that matched on
+// [joaju.ChannelName.Requested] -- which is why the [joaju.Broker] holds channels under
+// [joaju.ChannelName.String] and why this compares both halves.
+func (c *channel) accepts(e joaju.Event) error {
 	if e.Name == "" {
 		return fmt.Errorf("joaju: an event on %s needs a name", c.name.Requested())
 	}
 	if e.Channel.Tenant() != c.name.Tenant() {
 		return fmt.Errorf("%w: the event is for %q and the channel belongs to %q",
-			ErrWrongTenant, e.Channel.Tenant(), c.name.Tenant())
+			joaju.ErrWrongTenant, e.Channel.Tenant(), c.name.Tenant())
 	}
 	if e.Channel.Requested() != c.name.Requested() {
 		return fmt.Errorf("joaju: an event for %q was handed to %q",
@@ -392,8 +393,8 @@ func (c *channel) accepts(e Event) error {
 //
 // The caller holds the lock. It exists so that delivery happens after the lock
 // is released, which is the rule this type is built on.
-func (c *channel) gather(skip SocketID) []Subscriber {
-	recipients := make([]Subscriber, 0, len(c.subscribers))
+func (c *channel) gather(skip joaju.SocketID) []joaju.Subscriber {
+	recipients := make([]joaju.Subscriber, 0, len(c.subscribers))
 	for id, s := range c.subscribers {
 		if id == skip {
 			continue
@@ -424,7 +425,7 @@ func (c *channel) holds(userID string) bool {
 // emit is [channel.deliver] over a frame one of the builders in pusher.go
 // returned, so that the error of building it is answered once rather than at
 // each of the four call sites.
-func (c *channel) emit(ctx context.Context, to []Subscriber, f Frame, err error) error {
+func (c *channel) emit(ctx context.Context, to []joaju.Subscriber, f Frame, err error) error {
 	if err != nil {
 		return err
 	}
@@ -439,13 +440,13 @@ func (c *channel) emit(ctx context.Context, to []Subscriber, f Frame, err error)
 // same message built a thousand times.
 //
 // The frame is built by pusher.go and encoded by [Encode], and this file has no
-// second way to turn an [Event] into bytes: what goes out on the wire is one
+// second way to turn an [joaju.Event] into bytes: what goes out on the wire is one
 // piece of code, which is also the piece that drops the tenant from the channel
 // name.
 //
 // A socket that refuses the write does not stop the others. The errors are
 // joined so the caller learns about all of them.
-func (c *channel) deliver(ctx context.Context, to []Subscriber, f Frame) error {
+func (c *channel) deliver(ctx context.Context, to []joaju.Subscriber, f Frame) error {
 	if len(to) == 0 {
 		return nil
 	}
