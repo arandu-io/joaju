@@ -1,0 +1,63 @@
+name: spec-tests
+
+# The conformance suite, as a gate rather than as a thing somebody remembers to
+# run. The report committed under ws/internal/autobahn/ says the date it was
+# produced, which is a fact about that afternoon and not about the code on this
+# branch.
+#
+# It runs only when the transport changes. The suite drives 301 cases and group
+# 9 pushes 16 MiB per case, so making every pull request wait for it would buy
+# nothing on the ones that touch a controller.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "ws/**"
+      - ".github/workflows/spec-tests.yml"
+  pull_request:
+    paths:
+      - "ws/**"
+      - ".github/workflows/spec-tests.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  autobahn:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # The runner is amd64, so the suite image runs natively here. On an arm64
+      # developer machine the same image runs under emulation, which is why the
+      # local run takes minutes on group 9 and this one does not.
+      - name: Run the suite
+        env:
+          # Reaching the host from a container is the one part of the harness
+          # that is not the same everywhere. On this daemon it is the bridge
+          # gateway; host.docker.internal, which the committed spec names, does
+          # not resolve here.
+          AUTOBAHN_TARGET: 172.17.0.1:9001
+        run: ./ws/internal/autobahn/run.sh
+
+      # The harness exits non-zero on its own when a case comes back as anything
+      # but OK or NON-STRICT, so the step above is the verdict. The report is
+      # kept because the verdict says a case failed and not which one.
+      - name: Keep the report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: autobahn-report
+          path: |
+            ws/internal/autobahn/REPORT.txt
+            ws/internal/autobahn/reports/
+          retention-days: 14
+          if-no-files-found: warn
