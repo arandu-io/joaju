@@ -90,12 +90,18 @@ const (
 // refusals that are the transport's own go out through [Protocol.Refuse], which
 // is the implementation's bytes and not the server's.
 //
-// There are four methods and no fifth for reporting an error: the error comes
-// back from the call that failed.
+// The HTTP routes are the protocol's too, and arrive through [Protocol.Routes].
+// A wire protocol is what a client speaks over a socket AND what it calls over
+// HTTP, and the server that owns neither owns neither of them: it holds the
+// sockets, answers [Protocol.Routes] with an [API], and mounts what comes back.
 //
-// An implementation is called from the one goroutine that reads a given socket,
-// so calls concerning one [Connection] are ordered and never concurrent with
-// each other. Calls concerning different connections are concurrent.
+// There is no method for reporting an error: the error comes back from the call
+// that failed.
+//
+// The four socket methods are called from the one goroutine that reads a given
+// socket, so calls concerning one [Connection] are ordered and never concurrent
+// with each other. Calls concerning different connections are concurrent, and a
+// route runs on the goroutine net/http gave it.
 type Protocol interface {
 	// Open is called once, after the handshake was authorized and the socket is
 	// writable, and before any client frame is read. It is where
@@ -130,6 +136,89 @@ type Protocol interface {
 	// encode the three once for the process and hand back the same slice every
 	// time -- the caller writes it, and neither keeps nor modifies it.
 	Refuse(r Refusal) []byte
+
+	// Routes are the HTTP routes this protocol answers, mounted by the server
+	// beside the socket route it keeps. A nil answer is a protocol that answers
+	// none, and then the socket route is the whole of what the server serves.
+	//
+	// It is called once, from [NewServer], with everything a route may reach.
+	// The socket route is not among them: an upgrade is the transport's, and
+	// what comes back here is handed a request that will stay a request.
+	Routes(api API) http.Handler
+}
+
+// Registry is the sockets a [Server] knows about, as an HTTP route may read
+// them: what this process holds, what the other instances hold, and the one way
+// to close what this process holds.
+//
+// Every question takes a Grant a [ConnectPolicy] or a [SubscriptionPolicy]
+// issued, and the tenant on it is the only filter -- because it is the only one
+// that did not arrive with the request. There is nothing here that opens a
+// socket, nothing that closes one outside the Grant's tenant, and nothing that
+// counts across tenants: a count that spans them tells one customer how many of
+// another's people are online.
+//
+// [Server] is what implements it.
+type Registry interface {
+	// Connections is how many sockets this process holds for the Grant's
+	// tenant.
+	Connections(g auth.Grant) (int, error)
+
+	// Terminate closes every socket the Grant's tenant holds for one subject,
+	// and answers how many it closed.
+	Terminate(ctx context.Context, g auth.Grant, subject string) (int, error)
+
+	// Fleet is what the OTHER instances hold for the Grant's tenant. channel is
+	// [ChannelName.Requested] of the one channel being asked about, and is
+	// empty to ask about the whole tenant.
+	Fleet(ctx context.Context, g auth.Grant, channel string) FleetTally
+}
+
+var _ Registry = (*Server)(nil)
+
+// API is what a [Protocol] builds its HTTP routes out of, and is the whole of
+// what the server lets one of those routes reach.
+//
+// Six of the seven fields are the [ServerConfig] the server was built from, so
+// a route answers for the application the server answers for, runs the policies
+// the server runs, and reads channels through the Broker the sockets read them
+// through. There is no second place to say any of it. The seventh is
+// [API.Registry].
+//
+// What is NOT here is the shape of it: nothing writes to the connection
+// registry, and nothing reads one without a Grant. A [Protocol] that wanted to
+// count another tenant's sockets would have to be handed a Grant of that
+// tenant, and a [ConnectPolicy] is what issues one.
+//
+// A [Protocol] is handed one and does not build one.
+type API struct {
+	// AppID is the {appId} the routes carry. A request naming another app is
+	// answered 404, and one server is one application.
+	AppID string
+
+	// Broker holds the channels, and there is no method on it that reaches one
+	// without a Grant.
+	Broker Broker
+
+	// Connect decides whether a subject may act on this server at all. It is
+	// the policy the socket route runs, asked the same question with no socket
+	// on it -- an API caller wants no socket opened.
+	Connect ConnectPolicy
+
+	// Subscribe decides whether a subject may reach one channel. It runs once
+	// per channel a route touches, listing and counting included: reading who
+	// is talking to whom is a read, and there is no exception for reads.
+	Subscribe SubscriptionPolicy
+
+	// Registry is the sockets this process holds and what the other instances
+	// answered about theirs. See [Registry].
+	Registry Registry
+
+	// MaxBodySize is the largest body a route may read.
+	MaxBodySize int64
+
+	// Log is where a refused request is recorded. It is never nil.
+	Log *slog.Logger
 }
 
 // ServerConfig is what a [Server] is built from.
@@ -426,7 +515,14 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	s.mux.HandleFunc("GET /apps/{appId}/channels/{channel}", s.handleChannel)
 	s.mux.HandleFunc("GET /apps/{appId}/channels/{channel}/users", s.handleChannelUsers)
 	s.mux.HandleFunc("POST /apps/{appId}/users/{userId}/terminate_connections", s.handleTerminate)
-	s.mux.HandleFunc("GET /up", s.handleUp)
+
+	// The protocol's own, under the pattern that matches whatever the socket
+	// route did not. The socket route is registered first and is the more
+	// specific of the two, so it is reached whatever a protocol mounts -- an
+	// upgrade is the transport's, and no wire format may take it over.
+	if routes := cfg.Protocol.Routes(s.api()); routes != nil {
+		s.mux.Handle("/", routes)
+	}
 
 	// Last, because it starts goroutines: the relay subscribes to the fleet's
 	// questions from here on, and a server that failed to build after that
@@ -441,7 +537,23 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	return s, nil
 }
 
-// ServeHTTP routes the nine routes.
+// api is what this server offers a [Protocol] to answer HTTP requests with, and
+// is built once, after the defaults have been filled in -- so a route reads the
+// body limit the sockets were given and not the zero somebody left in the
+// config.
+func (s *Server) api() API {
+	return API{
+		AppID:       s.appID,
+		Broker:      s.broker,
+		Connect:     s.connect,
+		Subscribe:   s.subscribe,
+		Registry:    s,
+		MaxBodySize: s.maxBodySize,
+		Log:         s.log,
+	}
+}
+
+// ServeHTTP routes the socket route and whatever the [Protocol] brought.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) { s.mux.ServeHTTP(w, r) }
 
 // Connections is how many sockets this process holds for the Grant's tenant.
@@ -1032,17 +1144,6 @@ func (s *Server) handleTerminate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, struct{}{})
-}
-
-// handleUp is GET /up: the health check.
-//
-// It is the one route with no Grant, and it can be, because it reads nothing:
-// it says this process is answering, which whoever can reach the port already
-// knows.
-func (s *Server) handleUp(w http.ResponseWriter, _ *http.Request) {
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte("OK"))
 }
 
 // enter is the first half of every API route: the app has to be this one, the

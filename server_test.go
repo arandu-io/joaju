@@ -269,6 +269,14 @@ func (p *serverProtocol) Refuse(r joaju.Refusal) []byte {
 	return message
 }
 
+// Routes are the Pusher protocol's own, built out of the API the server hands
+// over. This type stands in for the frame layer so that a test can read what
+// reached a socket; the HTTP API is not stood in for, because what these tests
+// call is the real one.
+func (p *serverProtocol) Routes(api joaju.API) http.Handler {
+	return pusher.NewPusher(api.Broker, api.Subscribe, pusher.PusherConfig{}).Routes(api)
+}
+
 func (p *serverProtocol) sockets() []joaju.SocketID {
 	p.mu.Lock()
 	defer p.mu.Unlock()

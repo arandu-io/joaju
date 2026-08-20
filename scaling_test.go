@@ -794,6 +794,12 @@ func (fleetTestProtocol) Message(context.Context, *Connection, []byte) error { r
 func (fleetTestProtocol) Close(context.Context, *Connection)                 {}
 func (fleetTestProtocol) Refuse(Refusal) []byte                              { return nil }
 
+// Routes are none. This file's tests reach the fleet through [Server.Fleet] and
+// the registry through [Server.Connections], which is where the two halves of a
+// metrics route come from -- the route that adds them is the protocol's, and a
+// protocol is what the package this file is in may not import.
+func (fleetTestProtocol) Routes(API) http.Handler { return nil }
+
 // fleetTestInstance is one joaju process: a relay on the shared bus, and the
 // server attached to it.
 type fleetTestInstance struct {
