@@ -792,6 +792,7 @@ type fleetTestProtocol struct{}
 func (fleetTestProtocol) Open(context.Context, *Connection) error            { return nil }
 func (fleetTestProtocol) Message(context.Context, *Connection, []byte) error { return nil }
 func (fleetTestProtocol) Close(context.Context, *Connection)                 {}
+func (fleetTestProtocol) Refuse(Refusal) []byte                              { return nil }
 
 // fleetTestInstance is one joaju process: a relay on the shared bus, and the
 // server attached to it.

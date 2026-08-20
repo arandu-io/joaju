@@ -322,6 +322,43 @@ func (p *pusher) Close(ctx context.Context, conn *Connection) {
 	}
 }
 
+// Refuse renders a [Refusal] as the [EventError] frame carrying its code: 4004
+// for the connection quota, 4301 for the rate limit and 4200 for a frame this
+// server could not read.
+//
+// They are the codes a Pusher client already branches on, which is the whole
+// reason a refusal is worth a frame at all -- a socket that only closes says
+// what a dropped network says, and what a client does about a dropped network
+// is dial again.
+//
+// A refusal this protocol has no code for answers nil, and the caller writes
+// nothing. There is no fourth today; the answer is nil rather than a guessed
+// code because inventing one would tell a client something untrue about why.
+func (p *pusher) Refuse(r Refusal) []byte {
+	switch r {
+	case RefusalOverQuota:
+		return overQuotaFrame
+	case RefusalRateLimited:
+		return rateLimitedFrame
+	case RefusalUnreadable:
+		return invalidMessageFrame
+	}
+
+	return nil
+}
+
+// The three refusals a [Server] makes on its own, encoded once for the process.
+//
+// The error is discarded for the reason [ProtocolError.Frame] discards its own:
+// an event name and a struct of an int and a string have no encoding that can
+// fail. Encoding one per refusal would spend the most work on the socket this
+// exists to spend less on.
+var (
+	overQuotaFrame, _      = Encode(ErrOverQuota.Frame())
+	rateLimitedFrame, _    = Encode(ErrRateLimited.Frame())
+	invalidMessageFrame, _ = Encode(ErrInvalidMessage.Frame())
+)
+
 // join is pusher:subscribe: the client asking to listen on a channel.
 //
 // The order is the order of what each step protects. The name is built from the

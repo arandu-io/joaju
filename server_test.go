@@ -212,6 +212,31 @@ func (p *serverProtocol) Close(_ context.Context, conn *joaju.Connection) {
 	p.closed = append(p.closed, conn.ID())
 }
 
+// Refuse answers the codes the Pusher protocol answers, because what the tests
+// below check is that the server writes what it was handed, and a made-up frame
+// would prove that just as well while telling a reader nothing about which
+// refusal reached which socket.
+func (p *serverProtocol) Refuse(r joaju.Refusal) []byte {
+	var refusal joaju.ProtocolError
+	switch r {
+	case joaju.RefusalOverQuota:
+		refusal = joaju.ErrOverQuota
+	case joaju.RefusalRateLimited:
+		refusal = joaju.ErrRateLimited
+	case joaju.RefusalUnreadable:
+		refusal = joaju.ErrInvalidMessage
+	default:
+		return nil
+	}
+
+	message, err := joaju.Encode(refusal.Frame())
+	if err != nil {
+		return nil
+	}
+
+	return message
+}
+
 func (p *serverProtocol) sockets() []joaju.SocketID {
 	p.mu.Lock()
 	defer p.mu.Unlock()

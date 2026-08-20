@@ -57,20 +57,40 @@ const (
 	DefaultPongTimeout = 70 * time.Second
 )
 
+// Refusal is one of the three things a [Server] decides on its own, without any
+// frame having been understood.
+//
+// Each of them is the transport's: how many sockets a tenant may hold, how fast
+// one socket may send, and which opcode carries a message. A [Protocol] is
+// never handed the frame that caused one and could not answer for it -- but the
+// client still has to be told, and in something it can read. [Protocol.Refuse]
+// is where these three become bytes, so that the wire format stays in one place
+// and the server writes what it is given.
+type Refusal uint8
+
+const (
+	// RefusalOverQuota is the tenant already holding as many sockets as
+	// [ServerConfig.MaxConnections] allows. It is decided after the upgrade, so
+	// the socket is writable when the answer goes out, and it closes after.
+	RefusalOverQuota Refusal = iota
+	// RefusalRateLimited is a frame dropped because the socket is sending
+	// faster than [ServerConfig.MaxMessagesPerSecond] allows. The socket stays.
+	RefusalRateLimited
+	// RefusalUnreadable is a frame the transport delivered and this server
+	// cannot act on, which is one that was not a text frame. The socket stays.
+	RefusalUnreadable
+)
+
 // Protocol is the frame layer: what the [Server] hands a socket's traffic to.
 //
 // The server owns the socket -- the upgrade, the two goroutines, the deadlines,
-// the registry -- and owns no part of the Pusher protocol. It sends no frame of
-// its own, not even [EventConnectionEstablished], because a second place that
-// builds a frame is a second answer to what a frame looks like. The two it does
-// put on the wire are refusals this package already declared and it only
-// encodes, and both are frames a Protocol was never handed and could not answer
-// for: [ErrRateLimited] when [ServerConfig.MaxMessagesPerSecond] dropped the
-// frame, because that limit is the socket's, and [ErrInvalidMessage] when the
-// frame was not a text one, because the opcode is the transport's and stops
-// here.
+// the registry -- and owns no part of the Pusher protocol. It builds no frame
+// of its own, not even [EventConnectionEstablished], because a second place
+// that builds a frame is a second answer to what a frame looks like. The three
+// refusals that are the transport's own go out through [Protocol.Refuse], which
+// is the implementation's bytes and not the server's.
 //
-// There are three methods and no fourth for reporting an error: the error comes
+// There are four methods and no fifth for reporting an error: the error comes
 // back from the call that failed.
 //
 // An implementation is called from the one goroutine that reads a given socket,
@@ -99,6 +119,17 @@ type Protocol interface {
 	// down, so an implementation that has to reach Redis derives one with its
 	// own deadline.
 	Close(ctx context.Context, conn *Connection)
+
+	// Refuse answers with the bytes that tell a client about one [Refusal],
+	// ready to be written to its socket. An empty answer is written as nothing,
+	// and the refusal takes its course in silence.
+	//
+	// It takes no [Connection] and no context because it decides nothing and
+	// reaches nobody: the answer depends on the refusal alone, and the caller is
+	// the one holding the socket it belongs to. An implementation is free to
+	// encode the three once for the process and hand back the same slice every
+	// time -- the caller writes it, and neither keeps nor modifies it.
+	Refuse(r Refusal) []byte
 }
 
 // ServerConfig is what a [Server] is built from.
@@ -584,10 +615,7 @@ func (s *Server) read(r *http.Request, conn *Connection, socket *ws.Conn) {
 		// by the time an upgraded socket is refused, and a cancelled context
 		// would drop the very frame that stops the loop.
 		closing := context.WithoutCancel(ctx)
-		if quota, encodeErr := Encode(ErrOverQuota.Frame()); encodeErr != nil {
-			s.log.ErrorContext(ctx, "joaju: encoding the over-quota refusal failed",
-				slog.Any("error", encodeErr))
-		} else if sendErr := conn.Send(closing, quota); sendErr != nil {
+		if sendErr := s.tell(closing, conn, RefusalOverQuota); sendErr != nil {
 			s.log.InfoContext(ctx, "joaju: the refused socket was closed without being told why",
 				slog.String("socket", string(conn.ID())), slog.Any("error", sendErr))
 		}
@@ -644,7 +672,7 @@ func (s *Server) read(r *http.Request, conn *Connection, socket *ws.Conn) {
 			s.log.InfoContext(ctx, "joaju: a frame was dropped by the socket's rate limit",
 				slog.String("socket", string(conn.ID())),
 				slog.Int("limit", s.maxMessagesPerSecond))
-			_ = conn.Send(ctx, rateLimitedFrame)
+			_ = s.tell(ctx, conn, RefusalRateLimited)
 			continue
 		}
 
@@ -661,7 +689,7 @@ func (s *Server) read(r *http.Request, conn *Connection, socket *ws.Conn) {
 		if kind != ws.TextMessage {
 			s.log.InfoContext(ctx, "joaju: a frame was dropped because it was not text",
 				slog.String("socket", string(conn.ID())), slog.Int("opcode", kind))
-			_ = conn.Send(ctx, invalidMessageFrame)
+			_ = s.tell(ctx, conn, RefusalUnreadable)
 			continue
 		}
 
@@ -1304,17 +1332,20 @@ func (k *sink) flush() {
 	}
 }
 
-// The two refusals the [Server] puts on the wire itself, encoded once for the
-// process.
+// tell writes what the [Protocol] says a [Refusal] looks like, and answers
+// whether the write got through.
 //
-// The error is discarded for the reason [ProtocolError.Frame] discards its own:
-// an event name and a struct of an int and a string have no encoding that can
-// fail. Encoding one per refusal would spend the most work on the socket this
-// exists to spend less on.
-var (
-	rateLimitedFrame, _    = Encode(ErrRateLimited.Frame())
-	invalidMessageFrame, _ = Encode(ErrInvalidMessage.Frame())
-)
+// A protocol with nothing to say for this refusal writes nothing, and this
+// answers nil: the refusal itself has already been decided, and the frame is
+// only how the client hears about it.
+func (s *Server) tell(ctx context.Context, conn *Connection, r Refusal) error {
+	message := s.protocol.Refuse(r)
+	if len(message) == 0 {
+		return nil
+	}
+
+	return conn.Send(ctx, message)
+}
 
 // rateLimiter meters one socket's inbound frames, and is the whole of
 // [ServerConfig.MaxMessagesPerSecond].

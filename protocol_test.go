@@ -328,6 +328,43 @@ func TestNewPusherRefusesAWiringItCannotServe(t *testing.T) {
 	}
 }
 
+// The three refusals the server makes on its own reach the client as the codes
+// a Pusher client branches on.
+//
+// The server decides all three before any frame has been understood -- the
+// connection quota, the rate limit and the opcode are the transport's -- so it
+// asks for the bytes rather than building them, and this is the only place that
+// answer is written down.
+func TestPusherRendersTheServersOwnRefusals(t *testing.T) {
+	protocol := joaju.NewPusher(joaju.NewMemoryBroker(), &protocolPolicy{}, joaju.PusherConfig{})
+
+	for _, one := range []struct {
+		name    string
+		refusal joaju.Refusal
+		want    joaju.ProtocolError
+	}{
+		{"over quota", joaju.RefusalOverQuota, joaju.ErrOverQuota},
+		{"rate limited", joaju.RefusalRateLimited, joaju.ErrRateLimited},
+		{"unreadable", joaju.RefusalUnreadable, joaju.ErrInvalidMessage},
+	} {
+		t.Run(one.name, func(t *testing.T) {
+			if got, want := string(protocol.Refuse(one.refusal)), encode(t, one.want.Frame()); got != want {
+				t.Fatalf("Refuse(%d) = %s, want %s", one.refusal, got, want)
+			}
+		})
+	}
+}
+
+// A refusal this protocol has no code for is written as nothing, rather than as
+// a code that would tell the client something untrue about why.
+func TestPusherRefusesNothingItHasNoCodeFor(t *testing.T) {
+	protocol := joaju.NewPusher(joaju.NewMemoryBroker(), &protocolPolicy{}, joaju.PusherConfig{})
+
+	if got := protocol.Refuse(joaju.Refusal(200)); got != nil {
+		t.Fatalf("Refuse() of an unknown refusal = %s, want nothing", got)
+	}
+}
+
 func TestPusherEstablishesTheConnectionWithTheSocketIDAndTheActivityTimeout(t *testing.T) {
 	f := newProtocolFixture(t, joaju.PusherConfig{ActivityTimeout: 30 * time.Second})
 
