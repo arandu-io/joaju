@@ -14,8 +14,8 @@ import (
 
 // Everything in this file is named for the broker, because the package is one
 // package and another file's helpers share the namespace. The Grants, the
-// sockets and the names come from channels_test.go, which already mints them
-// through the policies that issue them.
+// sockets and the names come from channels_internal_test.go, which already
+// mints them through the policies that issue them.
 
 // brokerTestCreate is the channel a client of tenant asks for, made through the
 // broker.

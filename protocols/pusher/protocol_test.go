@@ -27,8 +27,8 @@ import (
 // sending the bytes a browser sends is answered with the bytes a Pusher client
 // reads, which is the whole of this type's job.
 //
-// The names are prefixed for the reason channels_test.go gives: the package is
-// one package and another file's helpers share the namespace.
+// The names are prefixed for the reason channels_internal_test.go gives: the
+// package is one package and another file's helpers share the namespace.
 
 // protocolPolicy is the [joaju.SubscriptionPolicy], and it records what it was
 // asked about -- which is how a test asserts that a subscription reached a
