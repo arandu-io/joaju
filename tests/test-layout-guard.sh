@@ -48,6 +48,22 @@ moduleOf() {
     printf '.\n'
 }
 
+# The three listings every check reads, taken once.
+#
+# Each one is required to be non-empty, and that is not defensiveness. Every
+# check below is of the form "no file in this listing is wrong", and that
+# sentence is TRUE of a listing with nothing in it: pointed at an empty tree, or
+# run where git tracks nothing, the guard passes having verified nothing. It is
+# the same defect as reading no status from go list, one layer up -- a
+# measurement that did not measure is not an approval.
+goFiles=$(git ls-files '*.go')
+testFiles=$(git ls-files '*_test.go')
+modFiles=$(git ls-files | grep -E '(^|/)go\.mod$' || true)
+
+[ -n "$goFiles" ] || report "git tracks no .go file here, so checks 1 and 3 verified nothing"
+[ -n "$testFiles" ] || report "git tracks no _test.go file here, so check 2 verified nothing"
+[ -n "$modFiles" ] || report "git tracks no go.mod here, so check 4 verified nothing"
+
 # 1. A file named *Test.go is production code. `go test` runs nothing inside it,
 #    and it says so with no error and no warning: the suite goes quiet and the
 #    integration stays green. It is the first check because it is the only one
@@ -58,7 +74,7 @@ moduleOf() {
 #    character before Test is _ and _ is not in the class -- and view_Test.go is
 #    the same silence for the same reason. Ending in Test.go is the whole of the
 #    question; a lower-case _test.go does not match it.
-offenders=$(git ls-files '*.go' | grep -E 'Test\.go$' || true)
+offenders=$(printf '%s\n' "$goFiles" | grep -E 'Test\.go$' || true)
 if [ -n "$offenders" ]; then
     printf '%s\n' "$offenders"
     report "*Test.go is not run by go test"
@@ -78,6 +94,9 @@ fi
 #    published documentation instead of relocating a test.
 offenders=""
 while IFS= read -r file; do
+    # An empty listing still feeds one empty line through printf, and without
+    # this the check reports a violation with no file name on it.
+    [ -n "$file" ] || continue
     built "$file" || continue
     [ "${file##*/}" = "example_test.go" ] && continue
 
@@ -93,7 +112,7 @@ while IFS= read -r file; do
     esac
 
     offenders+="$file"$'\n'
-done < <(git ls-files '*_test.go')
+done < <(printf '%s\n' "$testFiles")
 if [ -n "$offenders" ]; then
     printf '%s' "$offenders"
     report "test outside tests/ without the _internal suffix"
@@ -102,7 +121,7 @@ fi
 # 3. A capitalized package clause is not idiomatic Go. The directories are
 #    capitalized on purpose -- macOS is case-insensitive and tests/Unit is the
 #    only spelling there can be -- and the identifiers are not.
-offenders=$(git ls-files '*.go' | xargs grep -ln '^package [A-Z]' 2>/dev/null || true)
+offenders=$(printf '%s\n' "$goFiles" | xargs grep -ln '^package [A-Z]' 2>/dev/null || true)
 if [ -n "$offenders" ]; then
     printf '%s\n' "$offenders"
     report "capitalized package clause"
@@ -120,6 +139,7 @@ fi
 #    its diagnostics to /dev/null and reading no status is how a module that does
 #    not build becomes a green check.
 while IFS= read -r modfile; do
+    [ -n "$modfile" ] || continue
     dir=$(dirname "$modfile")
 
     if ! packages=$(cd "$dir" && GOWORK=off go list ./... 2>&1); then
@@ -145,6 +165,6 @@ while IFS= read -r modfile; do
         printf '%s\n' "$offenders"
         report "tests/Helpers reached by a production package of $dir/"
     fi
-done < <(git ls-files | grep -E '(^|/)go\.mod$')
+done < <(printf '%s\n' "$modFiles")
 
 exit $fail
