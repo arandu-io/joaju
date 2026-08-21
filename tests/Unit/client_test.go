@@ -1,4 +1,4 @@
-package client_test
+package unit
 
 import (
 	"bytes"
@@ -147,8 +147,8 @@ func TestTheURLCarriesTheHashOfWhatIsServed(t *testing.T) {
 	}
 }
 
-// No Node anywhere, checked rather than promised, and this package is where it
-// is most likely to be broken: it is the one that ships JavaScript.
+// No Node anywhere, checked rather than promised, and the client is where it is
+// most likely to be broken: it is the package that ships JavaScript.
 //
 // A project runs with `git clone && aru dev`. The moment a package.json appears
 // next to a .js file, somebody has a reason to run npm install, and the reason
@@ -160,9 +160,10 @@ func TestNoNodeAnywhereInThisRepository(t *testing.T) {
 		"rollup.config.js", "webpack.config.js", "tsconfig.json",
 	}
 
-	// ".." is the whole repository, because the promise is about the repository
-	// and not about this package.
-	err := filepath.WalkDir("..", func(path string, entry fs.DirEntry, err error) error {
+	// "../.." is the whole repository, because the promise is about the
+	// repository and not about a package of it. This file is two directories
+	// down -- tests/Unit -- so the root is two up.
+	err := filepath.WalkDir("../..", func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {
 			return nil
 		}
@@ -211,19 +212,5 @@ func TestTheScriptNeedsNoUnsafeContentSecurityPolicy(t *testing.T) {
 		if strings.Contains(source, banned) {
 			t.Errorf("the script contains %q, which needs a CSP this project does not serve, or a host it does not talk to", banned)
 		}
-	}
-}
-
-// The script is what a browser runs, so the syntax has to be a browser's. The
-// parse is free and it is the one failure that would otherwise reach a page.
-func TestTheScriptIsSyntacticallyValid(t *testing.T) {
-	runtime := findJSRuntime(t)
-
-	// Loading it is the parse, and the file assigns a global and starts nothing,
-	// so loading it is also all it does.
-	check := []byte("if (typeof globalThis.Joaju !== 'function') { throw new Error('the script defined no Joaju'); }\n")
-
-	if out, err := runtime.run(t, nil, client.Script(), check); err != nil {
-		t.Fatalf("the script does not load: %v\n%s", err, out)
 	}
 }

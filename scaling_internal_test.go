@@ -718,13 +718,14 @@ const (
 	fleetTestAppKey = "key-1"
 )
 
-// The fixture below is a second one, and server_test.go's is the first. It is
-// not a duplicate by choice: that file is the package's EXTERNAL test binary
-// and this one is the internal binary, so nothing there can see the in-memory
-// [Bus] declared here -- and a bus, which has to stand in for Redis pub/sub for
-// two instances at once, is much the harder of the two to be asked to write
-// twice. So the bus stays and the smaller half is restated: a Broker over a
-// map, a Protocol that does nothing, and the middleware every route needs.
+// The fixture below is a second one, and tests/Feature/server_test.go's is the
+// first. It is not a duplicate by choice: that file is a test of the exported
+// surface and this one is the internal binary, so nothing there can see the
+// in-memory [Bus] declared here -- and a bus, which has to stand in for Redis
+// pub/sub for two instances at once, is much the harder of the two to be asked
+// to write twice. So the bus stays and the smaller half is restated: a Broker
+// over a map, a Protocol that does nothing, and the middleware every route
+// needs.
 
 // fleetTestBroker is a [Broker] over a map, filtered by the Grant's tenant --
 // which is the whole reason [Broker.All] takes one.

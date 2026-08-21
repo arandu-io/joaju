@@ -26,9 +26,15 @@ we cannot take, whatever the license says.
 
 ```
 gofmt -l $(find . -name '*.go' -not -path '*/testdata/*' -not -name '*.kyse.go')   # no output
-go vet ./...
-go test -race ./...
+go vet -tags 'integration e2e' ./...
+go test -race -tags 'integration e2e' ./...
+bash tests/test-layout-guard.sh
 ```
+
+The tags matter: without them the suites that need something running are not
+compiled at all, and a suite nothing built is a suite nothing checked. They pull
+in a RESP server for `redis/tests/Integration` and a JavaScript runtime for
+`tests/E2E`; both skip and say so when there is none.
 
 CI runs exactly this, plus a check that no new dependency entered the graph:
 this repository depends on the standard library and `github.com/arandu-io/hesape`,
@@ -38,25 +44,35 @@ request that adds a dependency needs to argue for it first, in an issue.
 
 ## Where a test goes
 
-Beside the code it tests, named `*_test.go`, in the same directory. There is no
-`tests/` directory, and that is not style: `go test` attributes coverage per
-directory, so a test filed elsewhere leaves the package under test reporting
-0% -- and it can only reach what the package exports.
+One question comes before all the others, and it is technical: does the test
+need an identifier the package does not export?
 
-Which package the test declares is a real choice, and it answers one question:
+**Yes** — it stays beside the code, and the file name says so: `<name>_internal_test.go`.
+A `package main` has no external form, so its tests are always these.
 
-| declare | when |
+**No** — it goes in the mirrored tree, under the category that describes what it
+does:
+
+| directory | what runs there |
 |---|---|
-| `package X_test` | this is the **contract**. The test sees what a caller sees, which is the point |
-| `package X` | this is the **implementation**, and the test genuinely needs something the package does not export |
+| `tests/Unit/` | one thing, fast, deterministic, nothing running |
+| `tests/Feature/` | a whole feature, across layers |
+| `tests/Integration/` | real components — a server, a cache, an adapter |
+| `tests/E2E/` | the way a real client would use it |
+| `tests/Fuzz/` | with the corpus beside the target |
+| `tests/Specification/` | conformance against a specification that is not ours |
 
-Prefer the first. Take the second only when you use it -- `plans/testpackages.go`
-in the arandu-io working tree checks exactly that, by intersecting the
-identifiers a test names with what its package declares unexported, and the
-checklist runs it across every repository.
+`Integration` and `E2E` sit behind the `integration` and `e2e` build tags, so a
+fresh clone runs `go test ./...` and gets an answer without a server or a
+JavaScript runtime having to exist first.
 
-A `package main` has no external form: it cannot be imported, so its tests are
-internal and that is the end of it.
+Two things the go tool imposes, and neither is style. The `package` clause is
+always lower case, however the directory is spelled. And a file whose name does
+not end in `_test.go` is production code: `go test` runs nothing inside a
+`BrokerTest.go`, with no error and no warning.
+
+`bash tests/test-layout-guard.sh` checks all of it, and the decision behind it is
+ADR-0075.
 
 ## What the commit message says
 

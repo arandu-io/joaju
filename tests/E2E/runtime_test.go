@@ -1,4 +1,6 @@
-package client_test
+//go:build e2e
+
+package e2e
 
 import (
 	"bytes"
@@ -20,12 +22,13 @@ import (
 // knows works: the file is the half of the protocol this repository cannot
 // exercise from Go, and a handler test proves only that the bytes were served.
 //
-// It is the same line the Autobahn suite is already on in ws/internal/autobahn --
-// that one runs in a container with Python in it, and there is no Python in the
-// product either.
+// It is the same line the conformance suite is already on -- that one runs in a
+// container with Python in it, and there is no Python in the product either.
 //
-// Everything that needs one skips when there is none, so `go test ./...` on a
-// machine with no runtime installed passes and says which tests did not run.
+// Two things keep a machine with no runtime green. The suite is behind the e2e
+// build tag, so `go test ./...` does not reach it; and everything in it skips
+// when no runtime answers, so running it with the tag says which tests did not
+// run rather than failing.
 
 // jsRuntime is a JavaScript runtime that can run one file, or a skip.
 type jsRuntime struct {
@@ -142,4 +145,22 @@ func runScenario(t *testing.T, name string, environment []string) map[string]any
 	}
 
 	return result
+}
+
+// The script is what a browser runs, so the syntax has to be a browser's. The
+// parse is free and it is the one failure that would otherwise reach a page.
+//
+// It is here rather than beside the handler tests because a real engine has to
+// read the file for the question to be answered at all, and that engine is the
+// same one the scenarios below drive.
+func TestTheScriptIsSyntacticallyValid(t *testing.T) {
+	runtime := findJSRuntime(t)
+
+	// Loading it is the parse, and the file assigns a global and starts nothing,
+	// so loading it is also all it does.
+	check := []byte("if (typeof globalThis.Joaju !== 'function') { throw new Error('the script defined no Joaju'); }\n")
+
+	if out, err := runtime.run(t, nil, client.Script(), check); err != nil {
+		t.Fatalf("the script does not load: %v\n%s", err, out)
+	}
 }

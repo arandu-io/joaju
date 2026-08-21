@@ -36,8 +36,8 @@ jobs:
     # Valkey rather than Redis: same RESP, and it is the fork that stayed open
     # source. Dragonfly is the recommended default in production and answers the
     # same protocol -- doc 11. The variable is REDIS_ADDRESS because that is the
-    # name redis/redis_test.go reads, and the default it falls back to is this
-    # same address.
+    # name redis/tests/Integration reads, and the default it falls back to is
+    # this same address.
     #
     # The container runs for both entries of the matrix rather than only for the
     # one that uses it: a conditional here would be one more thing to get wrong,
@@ -87,29 +87,33 @@ jobs:
             exit 1
           fi
 
+      # With the tags, because without them the two suites that need something
+      # running -- tests/Integration, which needs a RESP server, and tests/E2E,
+      # which needs a JavaScript runtime -- are not compiled at all, and a suite
+      # nothing built is a suite nothing checked.
       - name: vet
-        run: go vet ./...
+        run: go vet -tags 'integration e2e' ./...
 
       # The race detector matters more here than anywhere else in the project: a
       # connection is a goroutine, a channel is shared by every goroutine
       # subscribed to it, and a broadcast walks the subscriber set while sockets
       # are opening and closing underneath it.
       - name: test
-        run: go test -race ./...
+        run: go test -race -tags 'integration e2e' ./...
 
-      # The three tests in redis/ that need a server skip when nothing answers,
-      # which is what keeps `go test ./...` working on a laptop with no RESP
-      # server installed. Here the container is up and REDIS_ADDRESS points at
-      # it, so a skip means it never came up -- and a skip that looks like a
-      # pass is a green CI over a driver nothing ran.
+      # tests/Integration skips when nothing answers, which is what keeps a
+      # laptop with no RESP server green. Here the container is up and
+      # REDIS_ADDRESS points at it, so a skip means it never came up -- and a
+      # skip that looks like a pass is a green CI over a driver nothing ran.
       #
-      # The whole package rather than one named test: the four refusals never
-      # skip, so any SKIP at all is the server missing, and a test added later
-      # is covered without anyone remembering to add it here.
+      # The whole suite rather than one named test: everything in tests/
+      # Integration needs a server, so any SKIP at all is the server missing,
+      # and a test added later is covered without anyone remembering to add it
+      # here. The refusals that need no server are tests/Unit and run either way.
       - name: the tests actually ran against a server
         if: matrix.module == 'redis'
         run: |
-          go test -count=1 -v ./... | tee /tmp/redis-tests
+          go test -tags integration -count=1 -v ./tests/Integration | tee /tmp/redis-tests
           if grep -q -- '--- SKIP:' /tmp/redis-tests; then
             echo
             echo "the tests skipped: no RESP server answered at $REDIS_ADDRESS"

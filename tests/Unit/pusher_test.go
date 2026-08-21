@@ -1,4 +1,4 @@
-package pusher_test
+package unit
 
 import (
 	"encoding/json"

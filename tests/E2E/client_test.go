@@ -1,4 +1,6 @@
-package client_test
+//go:build e2e
+
+package e2e
 
 import (
 	"bytes"

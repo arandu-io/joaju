@@ -1,4 +1,4 @@
-package joaju_test
+package feature
 
 import (
 	"context"
