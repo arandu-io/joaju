@@ -13,18 +13,18 @@ go 1.26
 // Go has no optional dependency, so the only place a driver can live is behind
 // a module boundary (ADR 0048). This is the same arrangement as
 // github.com/arandu-io/hesape/redis, which is the connection this module
-// borrows rather than opening a second one, and as github.com/arandu-io/storage/s3.
+// borrows rather than opening a second one, and as github.com/arandu-io/hesape/filesystem/s3.
 //
-// hesape/redis carries a tag of its own, redis/v0.4.0, which is how a Go
+// hesape/redis carries a tag of its own, redis/v0.5.0, which is how a Go
 // submodule is versioned: the tag is the directory plus the version, and the
 // proxy serves it under the full module path.
 require (
-	github.com/arandu-io/hesape/redis v0.4.0
+	github.com/arandu-io/hesape/redis v0.5.0
 	github.com/arandu-io/joaju v0.1.0
 )
 
 require (
-	github.com/arandu-io/hesape v0.11.0 // indirect
+	github.com/arandu-io/hesape v0.12.0 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/redis/go-redis/v9 v9.22.0 // indirect
 	go.uber.org/atomic v1.11.0 // indirect
