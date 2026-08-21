@@ -15,9 +15,9 @@ import (
 	"time"
 
 	"github.com/arandu-io/hesape/auth"
-	"github.com/arandu-io/hesape/broadcasting"
 	"github.com/arandu-io/joaju"
 	"github.com/arandu-io/joaju/protocols/pusher"
+	"github.com/arandu-io/joaju/tests"
 	"github.com/arandu-io/joaju/ws"
 )
 
@@ -27,36 +27,6 @@ const (
 	serverAppID  = "app-1"
 	serverAppKey = "key-1"
 )
-
-// tenant is the customer every channel in this file belongs to.
-const tenant = "acme"
-
-// channelName is the name of a channel of tenant, which is the only way there
-// is to build one.
-func channelName(t *testing.T, requested string) joaju.ChannelName {
-	t.Helper()
-
-	g := auth.SystemGrant(broadcasting.ChannelJoin, tenant)
-	name, err := joaju.NewChannelName(g, requested)
-	if err != nil {
-		t.Fatalf("NewChannelName(%q) = %v", requested, err)
-	}
-
-	return name
-}
-
-// encode is a frame as the bytes a client reads, so that a test can compare
-// what a socket was written against what the protocol would have written.
-func encode(t *testing.T, f pusher.Frame) string {
-	t.Helper()
-
-	b, err := pusher.Encode(f)
-	if err != nil {
-		t.Fatalf("Encode(%v) = %v", f, err)
-	}
-
-	return string(b)
-}
 
 // serverConnectPolicy answers every handshake the same way, so that a test can
 // say "allowed" or "refused" and look at what the server did next.
@@ -349,7 +319,7 @@ func newServerFixture(t *testing.T, cfg joaju.ServerConfig, channels ...*serverC
 	}
 	f.server = server
 
-	f.http = httptest.NewServer(serverSubject(server, auth.Subject{ID: "u1", Tenant: tenant}, true))
+	f.http = httptest.NewServer(serverSubject(server, auth.Subject{ID: "u1", Tenant: tests.Tenant}, true))
 	t.Cleanup(func() {
 		server.Close(context.Background())
 		f.http.Close()
@@ -600,14 +570,14 @@ func TestServerRefusesTheChannelListWhenThePolicyDoes(t *testing.T) {
 }
 
 func TestServerListsChannelsByTheNameTheClientAsked(t *testing.T) {
-	orders := &serverChannel{name: channelName(t, "orders.17")}
+	orders := &serverChannel{name: tests.ChannelName(t, "orders.17")}
 	f := newServerFixture(t, joaju.ServerConfig{}, orders)
 
 	status, body := f.get(t, "/apps/"+serverAppID+"/channels")
 	if status != http.StatusOK {
 		t.Fatalf("listing channels answered %d, want %d", status, http.StatusOK)
 	}
-	if strings.Contains(string(body), tenant) {
+	if strings.Contains(string(body), tests.Tenant) {
 		t.Fatalf("the channel list carried the tenant: %s", body)
 	}
 
@@ -628,15 +598,15 @@ func TestServerListsChannelsByTheNameTheClientAsked(t *testing.T) {
 	if len(handed) != 1 {
 		t.Fatalf("the broker was handed %d grants, want 1", len(handed))
 	}
-	if auth.Tenant(handed[0]) != tenant {
-		t.Fatalf("the broker was handed a grant for %q, want %q", auth.Tenant(handed[0]), tenant)
+	if auth.Tenant(handed[0]) != tests.Tenant {
+		t.Fatalf("the broker was handed a grant for %q, want %q", auth.Tenant(handed[0]), tests.Tenant)
 	}
 }
 
 func TestServerRefusesAChannelNameThatCarriesATenant(t *testing.T) {
 	f := newServerFixture(t, joaju.ServerConfig{})
 
-	status, _ := f.get(t, "/apps/"+serverAppID+"/channels/"+tenant+":orders.17")
+	status, _ := f.get(t, "/apps/"+serverAppID+"/channels/"+tests.Tenant+":orders.17")
 	if status != http.StatusBadRequest {
 		t.Fatalf("a channel name carrying a tenant answered %d, want %d: naming a tenant is choosing whose events you hear", status, http.StatusBadRequest)
 	}
@@ -647,7 +617,7 @@ func TestServerRefusesAChannelNameThatCarriesATenant(t *testing.T) {
 
 func TestServerAnswersAboutOneChannel(t *testing.T) {
 	orders := &serverChannel{
-		name:        channelName(t, "presence-orders.17"),
+		name:        tests.ChannelName(t, "presence-orders.17"),
 		subscribers: []joaju.Subscriber{{Member: joaju.Member{UserID: "u1"}}, {Member: joaju.Member{UserID: "u1"}}, {Member: joaju.Member{UserID: "u2"}}},
 	}
 	f := newServerFixture(t, joaju.ServerConfig{}, orders)
@@ -678,7 +648,7 @@ func TestServerAnswersAboutOneChannel(t *testing.T) {
 
 func TestServerAnswersAboutTheMembersOfAPresenceChannel(t *testing.T) {
 	orders := &serverChannel{
-		name:        channelName(t, "presence-orders.17"),
+		name:        tests.ChannelName(t, "presence-orders.17"),
 		subscribers: []joaju.Subscriber{{Member: joaju.Member{UserID: "u1"}}, {Member: joaju.Member{UserID: "u1"}}},
 	}
 	f := newServerFixture(t, joaju.ServerConfig{}, orders)
@@ -702,7 +672,7 @@ func TestServerAnswersAboutTheMembersOfAPresenceChannel(t *testing.T) {
 }
 
 func TestServerRefusesTheMembersOfAChannelThatHasNone(t *testing.T) {
-	orders := &serverChannel{name: channelName(t, "orders.17")}
+	orders := &serverChannel{name: tests.ChannelName(t, "orders.17")}
 	f := newServerFixture(t, joaju.ServerConfig{}, orders)
 
 	status, _ := f.get(t, "/apps/"+serverAppID+"/channels/orders.17/users")
@@ -721,7 +691,7 @@ func TestServerAnswersAnUnknownChannelWithNotFound(t *testing.T) {
 }
 
 func TestServerPublishesToTheChannelTheGrantNamed(t *testing.T) {
-	orders := &serverChannel{name: channelName(t, "orders.17")}
+	orders := &serverChannel{name: tests.ChannelName(t, "orders.17")}
 	f := newServerFixture(t, joaju.ServerConfig{}, orders)
 
 	status, _ := f.post(t, "/apps/"+serverAppID+"/events",
@@ -740,13 +710,13 @@ func TestServerPublishesToTheChannelTheGrantNamed(t *testing.T) {
 	}
 	// The name the client sent has no tenant in it, and the name the channel is
 	// held under does. Both, from one Grant.
-	if e.Channel.Requested() != "orders.17" || e.Channel.String() != tenant+":orders.17" {
+	if e.Channel.Requested() != "orders.17" || e.Channel.String() != tests.Tenant+":orders.17" {
 		t.Fatalf("the event went to %q, published as %q", e.Channel.Requested(), e.Channel.String())
 	}
 }
 
 func TestServerRefusesToPublishAReservedEventName(t *testing.T) {
-	orders := &serverChannel{name: channelName(t, "presence-orders.17")}
+	orders := &serverChannel{name: tests.ChannelName(t, "presence-orders.17")}
 	f := newServerFixture(t, joaju.ServerConfig{}, orders)
 
 	for _, name := range []string{"pusher:error", "pusher_internal:member_added"} {
@@ -762,7 +732,7 @@ func TestServerRefusesToPublishAReservedEventName(t *testing.T) {
 }
 
 func TestServerRefusesToPublishWhatIsNotJSON(t *testing.T) {
-	orders := &serverChannel{name: channelName(t, "orders.17")}
+	orders := &serverChannel{name: tests.ChannelName(t, "orders.17")}
 	f := newServerFixture(t, joaju.ServerConfig{}, orders)
 
 	status, _ := f.post(t, "/apps/"+serverAppID+"/events",
@@ -773,7 +743,7 @@ func TestServerRefusesToPublishWhatIsNotJSON(t *testing.T) {
 }
 
 func TestServerRefusesToPublishWhenTheSubscriptionPolicyDoes(t *testing.T) {
-	orders := &serverChannel{name: channelName(t, "orders.17")}
+	orders := &serverChannel{name: tests.ChannelName(t, "orders.17")}
 	f := newServerFixture(t, joaju.ServerConfig{
 		Subscribe: &serverSubscriptionPolicy{err: errors.New("not yours")},
 	}, orders)
@@ -789,8 +759,8 @@ func TestServerRefusesToPublishWhenTheSubscriptionPolicyDoes(t *testing.T) {
 }
 
 func TestServerAuthorizesEveryElementOfABatch(t *testing.T) {
-	orders := &serverChannel{name: channelName(t, "orders.17")}
-	invoices := &serverChannel{name: channelName(t, "invoices.9")}
+	orders := &serverChannel{name: tests.ChannelName(t, "orders.17")}
+	invoices := &serverChannel{name: tests.ChannelName(t, "invoices.9")}
 	f := newServerFixture(t, joaju.ServerConfig{}, orders, invoices)
 
 	status, _ := f.post(t, "/apps/"+serverAppID+"/batch_events",
@@ -1090,7 +1060,7 @@ func TestServerRefusesTheFramesPastTheSocketsRateLimit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reading the answer to a burst past the limit = %v", err)
 	}
-	if want := encode(t, pusher.ErrRateLimited.Frame()); string(message) != want {
+	if want := tests.Encode(t, pusher.ErrRateLimited.Frame()); string(message) != want {
 		t.Fatalf("the answer to a burst past the limit was %s, want %s", message, want)
 	}
 
@@ -1138,7 +1108,7 @@ func TestServerDropsAFrameThatIsNotText(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reading the answer to a binary frame = %v", err)
 	}
-	if want := encode(t, pusher.ErrInvalidMessage.Frame()); string(message) != want {
+	if want := tests.Encode(t, pusher.ErrInvalidMessage.Frame()); string(message) != want {
 		t.Fatalf("the answer to a binary frame was %s, want %s", message, want)
 	}
 

@@ -18,6 +18,7 @@ import (
 	"github.com/arandu-io/hesape/auth"
 	"github.com/arandu-io/joaju"
 	"github.com/arandu-io/joaju/protocols/pusher"
+	"github.com/arandu-io/joaju/tests"
 	"github.com/arandu-io/joaju/ws"
 )
 
@@ -189,7 +190,7 @@ func newProtocolFixture(t *testing.T, cfg pusher.PusherConfig, over ...joaju.Bro
 	}
 
 	f := &protocolFixture{
-		http:     httptest.NewServer(protocolSubject(server, auth.Subject{ID: "u1", Tenant: tenant})),
+		http:     httptest.NewServer(protocolSubject(server, auth.Subject{ID: "u1", Tenant: tests.Tenant})),
 		server:   server,
 		policy:   policy,
 		observer: observer,
@@ -340,7 +341,7 @@ func protocolNext(t *testing.T, conn *ws.Conn) pusher.Frame {
 	if err != nil {
 		t.Fatalf("reading a frame = %v", err)
 	}
-	if strings.Contains(string(message), tenant) {
+	if strings.Contains(string(message), tests.Tenant) {
 		t.Fatalf("a frame reached the wire carrying the tenant: %s", message)
 	}
 
@@ -459,7 +460,7 @@ func TestPusherRendersTheServersOwnRefusals(t *testing.T) {
 		{"unreadable", joaju.RefusalUnreadable, pusher.ErrInvalidMessage},
 	} {
 		t.Run(one.name, func(t *testing.T) {
-			if got, want := string(protocol.Refuse(one.refusal)), encode(t, one.want.Frame()); got != want {
+			if got, want := string(protocol.Refuse(one.refusal)), tests.Encode(t, one.want.Frame()); got != want {
 				t.Fatalf("Refuse(%d) = %s, want %s", one.refusal, got, want)
 			}
 		})
@@ -524,8 +525,8 @@ func TestPusherAsksThePolicyAboutAPublicChannelToo(t *testing.T) {
 	if len(asked) != 1 {
 		t.Fatalf("the policy was asked %d times, want once: a public channel is a read like any other", len(asked))
 	}
-	if asked[0].Channel.Requested() != "orders.17" || asked[0].Channel.Tenant() != tenant {
-		t.Fatalf("the policy was asked about %+v, want orders.17 of %s", asked[0].Channel, tenant)
+	if asked[0].Channel.Requested() != "orders.17" || asked[0].Channel.Tenant() != tests.Tenant {
+		t.Fatalf("the policy was asked about %+v, want orders.17 of %s", asked[0].Channel, tests.Tenant)
 	}
 	if asked[0].Socket == "" {
 		t.Fatal("the policy was not told which socket was asking")
@@ -668,7 +669,7 @@ func TestPusherRefusesAChannelNameThatCarriesATenant(t *testing.T) {
 	f := newProtocolFixture(t, pusher.PusherConfig{})
 	conn, _ := f.open(t)
 
-	protocolSend(t, conn, `{"event":"pusher:subscribe","data":{"channel":"`+tenant+`:private-orders.17"}}`)
+	protocolSend(t, conn, `{"event":"pusher:subscribe","data":{"channel":"`+tests.Tenant+`:private-orders.17"}}`)
 	if code, _ := protocolRefusal(t, conn); code != pusher.CodeInvalidMessage {
 		t.Fatalf("a channel name carrying a tenant answered %d, want %d: naming a tenant is choosing whose events you hear", code, pusher.CodeInvalidMessage)
 	}
@@ -1008,7 +1009,7 @@ func TestPusherRelaysAClientEventToTheOthersAndNotToTheSender(t *testing.T) {
 	// bytes the other subscriber was sent.
 	relayed := protocolNext(t, other)
 	want := `{"event":"client-typing","data":"{\"at\":1}","channel":"private-room.1"}`
-	if got := encode(t, relayed); got != want {
+	if got := tests.Encode(t, relayed); got != want {
 		t.Fatalf("the other subscriber received %s, want %s", got, want)
 	}
 
@@ -1047,7 +1048,7 @@ func TestPusherRelaysAClientEventOnAPresenceChannelWithTheSendersUserID(t *testi
 
 	relayed := protocolNext(t, other)
 	want := `{"event":"client-typing","data":"{\"at\":1}","channel":"presence-room.1","user_id":"u2"}`
-	if got := encode(t, relayed); got != want {
+	if got := tests.Encode(t, relayed); got != want {
 		t.Fatalf("the other subscriber received %s, want %s", got, want)
 	}
 
@@ -1072,10 +1073,10 @@ func TestPusherLeavesTheChannelWhenTheClientUnsubscribes(t *testing.T) {
 
 	// The last subscriber left, so the channel went with it.
 	created, removed := f.observer.counts()
-	if len(created) != 1 || created[0] != tenant+":orders.17" {
+	if len(created) != 1 || created[0] != tests.Tenant+":orders.17" {
 		t.Fatalf("the observer was told of %v created, want the one channel", created)
 	}
-	if len(removed) != 1 || removed[0] != tenant+":orders.17" {
+	if len(removed) != 1 || removed[0] != tests.Tenant+":orders.17" {
 		t.Fatalf("the observer was told of %v removed, want the one channel", removed)
 	}
 
@@ -1137,8 +1138,8 @@ func TestPusherTakesASocketOffItsChannelsWhenItCloses(t *testing.T) {
 
 	_ = conn.Close()
 
-	f.observer.waitForRemoved(t, tenant+":orders.17")
-	f.observer.waitForRemoved(t, tenant+":invoices.9")
+	f.observer.waitForRemoved(t, tests.Tenant+":orders.17")
+	f.observer.waitForRemoved(t, tests.Tenant+":invoices.9")
 
 	status, body := f.get(t, "/apps/"+protocolAppID+"/channels")
 	if status != http.StatusOK {
@@ -1166,7 +1167,7 @@ func TestPusherAnnouncesAChannelOnceHoweverManySocketsSubscribe(t *testing.T) {
 	protocolSubscribe(t, first, "orders.17")
 
 	created, removed := f.observer.counts()
-	if len(created) != 1 || created[0] != tenant+":orders.17" {
+	if len(created) != 1 || created[0] != tests.Tenant+":orders.17" {
 		t.Fatalf("the observer was told of %v, want one channel created", created)
 	}
 	if len(removed) != 0 {

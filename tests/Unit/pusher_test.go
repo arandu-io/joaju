@@ -8,40 +8,10 @@ import (
 	"time"
 
 	"github.com/arandu-io/hesape/auth"
-	"github.com/arandu-io/hesape/broadcasting"
 	"github.com/arandu-io/joaju"
 	"github.com/arandu-io/joaju/protocols/pusher"
+	"github.com/arandu-io/joaju/tests"
 )
-
-// tenant is the customer every channel in this file belongs to. It is a string
-// no channel name here contains, so a test can assert that it did not reach the
-// wire by looking for it.
-const tenant = "acme"
-
-// channelName is the only way a test gets a ChannelName, and it goes through
-// the Grant like everything else.
-func channelName(t *testing.T, requested string) joaju.ChannelName {
-	t.Helper()
-
-	g := auth.SystemGrant(broadcasting.ChannelJoin, tenant)
-	name, err := joaju.NewChannelName(g, requested)
-	if err != nil {
-		t.Fatalf("NewChannelName(%q) = %v", requested, err)
-	}
-
-	return name
-}
-
-func encode(t *testing.T, f pusher.Frame) string {
-	t.Helper()
-
-	b, err := pusher.Encode(f)
-	if err != nil {
-		t.Fatalf("Encode(%v) = %v", f, err)
-	}
-
-	return string(b)
-}
 
 func TestEncodeWritesDataAsAStringContainingJSON(t *testing.T) {
 	f := pusher.Frame{
@@ -51,13 +21,13 @@ func TestEncodeWritesDataAsAStringContainingJSON(t *testing.T) {
 	}
 
 	want := `{"event":"orders.updated","data":"{\"id\":17}","channel":"private-orders.17"}`
-	if got := encode(t, f); got != want {
+	if got := tests.Encode(t, f); got != want {
 		t.Errorf("Encode() = %s, want %s", got, want)
 	}
 }
 
 func TestEncodeOmitsTheFieldsWithNoValue(t *testing.T) {
-	if got, want := encode(t, pusher.Pong()), `{"event":"pusher:pong"}`; got != want {
+	if got, want := tests.Encode(t, pusher.Pong()), `{"event":"pusher:pong"}`; got != want {
 		t.Errorf("Encode(Pong()) = %s, want %s", got, want)
 	}
 }
@@ -187,7 +157,7 @@ func TestFrameRoundTrips(t *testing.T) {
 		UserID:  "7",
 	}
 
-	got, err := pusher.Decode([]byte(encode(t, want)))
+	got, err := pusher.Decode([]byte(tests.Encode(t, want)))
 	if err != nil {
 		t.Fatalf("Decode() = %v", err)
 	}
@@ -200,7 +170,7 @@ func TestFrameRoundTrips(t *testing.T) {
 }
 
 func TestConnectionEstablishedCarriesTheSocketID(t *testing.T) {
-	got := encode(t, pusher.ConnectionEstablished("7.1", 30*time.Second))
+	got := tests.Encode(t, pusher.ConnectionEstablished("7.1", 30*time.Second))
 	want := `{"event":"pusher:connection_established","data":"{\"socket_id\":\"7.1\",\"activity_timeout\":30}"}`
 	if got != want {
 		t.Errorf("Encode(ConnectionEstablished()) = %s, want %s", got, want)
@@ -208,7 +178,7 @@ func TestConnectionEstablishedCarriesTheSocketID(t *testing.T) {
 }
 
 func TestConnectionEstablishedOmitsATimeoutItWasNotGiven(t *testing.T) {
-	got := encode(t, pusher.ConnectionEstablished("7.1", 0))
+	got := tests.Encode(t, pusher.ConnectionEstablished("7.1", 0))
 	want := `{"event":"pusher:connection_established","data":"{\"socket_id\":\"7.1\"}"}`
 	if got != want {
 		t.Errorf("Encode(ConnectionEstablished()) = %s, want %s", got, want)
@@ -223,19 +193,19 @@ func TestConnectionEstablishedNeverAsksForATimeoutOfZeroSeconds(t *testing.T) {
 }
 
 func TestSubscriptionSucceededAlwaysCarriesAnObject(t *testing.T) {
-	f, err := pusher.SubscriptionSucceeded(channelName(t, "orders"), nil)
+	f, err := pusher.SubscriptionSucceeded(tests.ChannelName(t, "orders"), nil)
 	if err != nil {
 		t.Fatalf("SubscriptionSucceeded() = %v", err)
 	}
 
 	want := `{"event":"pusher_internal:subscription_succeeded","data":"{}","channel":"orders"}`
-	if got := encode(t, f); got != want {
+	if got := tests.Encode(t, f); got != want {
 		t.Errorf("Encode() = %s, want %s", got, want)
 	}
 }
 
 func TestMemberAddedCarriesTheWholeMember(t *testing.T) {
-	name := channelName(t, "presence-room.1")
+	name := tests.ChannelName(t, "presence-room.1")
 	member := joaju.Member{UserID: "7", Info: json.RawMessage(`{"name":"Ana"}`)}
 
 	f, err := pusher.MemberAdded(name, member)
@@ -244,13 +214,13 @@ func TestMemberAddedCarriesTheWholeMember(t *testing.T) {
 	}
 
 	want := `{"event":"pusher_internal:member_added","data":"{\"user_id\":\"7\",\"user_info\":{\"name\":\"Ana\"}}","channel":"presence-room.1"}`
-	if got := encode(t, f); got != want {
+	if got := tests.Encode(t, f); got != want {
 		t.Errorf("Encode() = %s, want %s", got, want)
 	}
 }
 
 func TestMemberRemovedCarriesOnlyTheUserID(t *testing.T) {
-	name := channelName(t, "presence-room.1")
+	name := tests.ChannelName(t, "presence-room.1")
 	member := joaju.Member{UserID: "7", Info: json.RawMessage(`{"name":"Ana"}`)}
 
 	f, err := pusher.MemberRemoved(name, member)
@@ -259,19 +229,19 @@ func TestMemberRemovedCarriesOnlyTheUserID(t *testing.T) {
 	}
 
 	want := `{"event":"pusher_internal:member_removed","data":"{\"user_id\":\"7\"}","channel":"presence-room.1"}`
-	if got := encode(t, f); got != want {
+	if got := tests.Encode(t, f); got != want {
 		t.Errorf("Encode() = %s, want %s", got, want)
 	}
 }
 
 func TestCacheMissNamesTheChannelAndCarriesNothing(t *testing.T) {
-	f, err := pusher.CacheMiss(channelName(t, "cache-prices"))
+	f, err := pusher.CacheMiss(tests.ChannelName(t, "cache-prices"))
 	if err != nil {
 		t.Fatalf("CacheMiss() = %v", err)
 	}
 
 	want := `{"event":"pusher:cache_miss","channel":"cache-prices"}`
-	if got := encode(t, f); got != want {
+	if got := tests.Encode(t, f); got != want {
 		t.Errorf("Encode() = %s, want %s", got, want)
 	}
 }
@@ -282,8 +252,8 @@ func TestCacheMissNamesTheChannelAndCarriesNothing(t *testing.T) {
 // constructor that names a channel is here, because the mistake is one line in
 // any one of them.
 func TestNoFrameCarriesTheTenant(t *testing.T) {
-	name := channelName(t, "presence-room.1")
-	if !strings.HasPrefix(name.String(), tenant+":") {
+	name := tests.ChannelName(t, "presence-room.1")
+	if !strings.HasPrefix(name.String(), tests.Tenant+":") {
 		t.Fatalf("String() = %s, want it to carry the tenant", name.String())
 	}
 
@@ -312,7 +282,7 @@ func TestNoFrameCarriesTheTenant(t *testing.T) {
 		if f.Channel != name.Requested() {
 			t.Errorf("%s carried the channel %s, want %s", f.Event, f.Channel, name.Requested())
 		}
-		if got := encode(t, f); strings.Contains(got, tenant) {
+		if got := tests.Encode(t, f); strings.Contains(got, tests.Tenant) {
 			t.Errorf("%s reached the wire carrying the tenant: %s", f.Event, got)
 		}
 	}
@@ -437,7 +407,7 @@ func TestClientEventsAreOffInTheZeroValue(t *testing.T) {
 	var events pusher.ClientEvents
 
 	f := pusher.Frame{Event: "client-typing", Channel: "private-room.1"}
-	_, err := events.Accept(f, channelName(t, "private-room.1"), "7.1", joaju.Member{}, true)
+	_, err := events.Accept(f, tests.ChannelName(t, "private-room.1"), "7.1", joaju.Member{}, true)
 	if !errors.Is(err, pusher.ErrClientEventsDisabled) {
 		t.Fatalf("Accept() = %v, want ErrClientEventsDisabled", err)
 	}
@@ -445,7 +415,7 @@ func TestClientEventsAreOffInTheZeroValue(t *testing.T) {
 
 func TestClientEventsRefuseAPublicChannel(t *testing.T) {
 	f := pusher.Frame{Event: "client-typing", Channel: "room.1"}
-	_, err := pusher.ClientEventsOn.Accept(f, channelName(t, "room.1"), "7.1", joaju.Member{}, true)
+	_, err := pusher.ClientEventsOn.Accept(f, tests.ChannelName(t, "room.1"), "7.1", joaju.Member{}, true)
 	if !errors.Is(err, pusher.ErrClientEventChannel) {
 		t.Fatalf("Accept() = %v, want ErrClientEventChannel", err)
 	}
@@ -453,7 +423,7 @@ func TestClientEventsRefuseAPublicChannel(t *testing.T) {
 
 func TestClientEventsRefuseSomebodyWhoIsNotOnTheChannel(t *testing.T) {
 	f := pusher.Frame{Event: "client-typing", Channel: "private-room.1"}
-	_, err := pusher.ClientEventsOn.Accept(f, channelName(t, "private-room.1"), "7.1", joaju.Member{}, false)
+	_, err := pusher.ClientEventsOn.Accept(f, tests.ChannelName(t, "private-room.1"), "7.1", joaju.Member{}, false)
 	if !errors.Is(err, pusher.ErrNotSubscribed) {
 		t.Fatalf("Accept() = %v, want ErrNotSubscribed", err)
 	}
@@ -461,7 +431,7 @@ func TestClientEventsRefuseSomebodyWhoIsNotOnTheChannel(t *testing.T) {
 
 func TestClientEventsRefuseAFrameThatIsNotOne(t *testing.T) {
 	f := pusher.Frame{Event: joaju.EventMemberAdded, Channel: "presence-room.1"}
-	_, err := pusher.ClientEventsOn.Accept(f, channelName(t, "presence-room.1"), "7.1", joaju.Member{}, true)
+	_, err := pusher.ClientEventsOn.Accept(f, tests.ChannelName(t, "presence-room.1"), "7.1", joaju.Member{}, true)
 	if !errors.Is(err, pusher.ErrInvalidMessage) {
 		t.Fatalf("Accept() = %v, want ErrInvalidMessage", err)
 	}
@@ -469,14 +439,14 @@ func TestClientEventsRefuseAFrameThatIsNotOne(t *testing.T) {
 
 func TestClientEventsRefuseAChannelResolvedFromAnotherName(t *testing.T) {
 	f := pusher.Frame{Event: "client-typing", Channel: "private-room.1"}
-	_, err := pusher.ClientEventsOn.Accept(f, channelName(t, "private-room.2"), "7.1", joaju.Member{}, true)
+	_, err := pusher.ClientEventsOn.Accept(f, tests.ChannelName(t, "private-room.2"), "7.1", joaju.Member{}, true)
 	if !errors.Is(err, pusher.ErrInvalidMessage) {
 		t.Fatalf("Accept() = %v, want ErrInvalidMessage", err)
 	}
 }
 
 func TestClientEventsAcceptASubscriberOfAGuardedChannel(t *testing.T) {
-	name := channelName(t, "private-room.1")
+	name := tests.ChannelName(t, "private-room.1")
 	f := pusher.Frame{Event: "client-typing", Channel: "private-room.1", Data: json.RawMessage(`{"at":1}`)}
 
 	// A private channel seats no member, so there is nobody to name and the
@@ -507,7 +477,7 @@ func TestClientEventsAcceptASubscriberOfAGuardedChannel(t *testing.T) {
 	}
 
 	want := `{"event":"client-typing","data":"{\"at\":1}","channel":"private-room.1"}`
-	if got := encode(t, relayed); got != want {
+	if got := tests.Encode(t, relayed); got != want {
 		t.Errorf("Encode() = %s, want %s -- a user_id of \"\" is a key a client has to be taught to expect", got, want)
 	}
 }
@@ -516,7 +486,7 @@ func TestClientEventsAcceptASubscriberOfAGuardedChannel(t *testing.T) {
 // seat, and a frame that claims another one does not get to say so. This is what
 // makes "somebody is typing" name a person rather than a stranger's byte.
 func TestClientEventsCarryTheSeatedMemberAndNotTheUserIDTheFrameClaims(t *testing.T) {
-	name := channelName(t, "presence-room.1")
+	name := tests.ChannelName(t, "presence-room.1")
 	f := pusher.Frame{
 		Event:   "client-typing",
 		Channel: "presence-room.1",
@@ -541,7 +511,7 @@ func TestClientEventsCarryTheSeatedMemberAndNotTheUserIDTheFrameClaims(t *testin
 	// client reads it. [Member.Info] is not in it: the receivers were given it
 	// when the member arrived.
 	want := `{"event":"client-typing","data":"{\"at\":1}","channel":"presence-room.1","user_id":"7"}`
-	if got := encode(t, relayed); got != want {
+	if got := tests.Encode(t, relayed); got != want {
 		t.Errorf("Encode() = %s, want %s", got, want)
 	}
 }
@@ -549,7 +519,7 @@ func TestClientEventsCarryTheSeatedMemberAndNotTheUserIDTheFrameClaims(t *testin
 func TestErrorFrameKeepsTheCodeAndDropsTheCause(t *testing.T) {
 	err := errors.New("channel private-orders.17 denied for subject u_31: not the owner")
 
-	got := encode(t, pusher.ErrorFrame(err))
+	got := tests.Encode(t, pusher.ErrorFrame(err))
 	want := `{"event":"pusher:error","data":"{\"code\":4200,\"message\":\"Invalid message format\"}"}`
 	if got != want {
 		t.Errorf("ErrorFrame() = %s, want %s", got, want)
@@ -584,7 +554,7 @@ func TestErrorFrameKeepsAProtocolErrorFoundAtAnyDepth(t *testing.T) {
 }
 
 func TestProtocolErrorFrameIsTheOneThePusherClientsRead(t *testing.T) {
-	got := encode(t, pusher.ErrOverQuota.Frame())
+	got := tests.Encode(t, pusher.ErrOverQuota.Frame())
 	want := `{"event":"pusher:error","data":"{\"code\":4004,\"message\":\"Application is over connection quota\"}"}`
 	if got != want {
 		t.Errorf("Frame() = %s, want %s", got, want)
