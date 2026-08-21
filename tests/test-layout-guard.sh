@@ -142,6 +142,16 @@ while IFS= read -r modfile; do
     [ -n "$modfile" ] || continue
     dir=$(dirname "$modfile")
 
+    # The cache is warmed before anything is measured, and it is not a
+    # convenience. `go list` writes "go: downloading <module> <version>" to
+    # stderr, which is captured here on purpose so that a module that does not
+    # build is reported instead of read as an empty package list -- and those
+    # two lines then arrive as package names, which is what "no required module
+    # provides package v0.12.0" is. On a warm cache nothing is printed and the
+    # check behaves the same; on CI, where the cache is cold every run, this is
+    # the difference between measuring and failing to.
+    (cd "$dir" && GOWORK=off go mod download all >/dev/null 2>&1) || true
+
     if ! packages=$(cd "$dir" && GOWORK=off go list ./... 2>&1); then
         printf '%s\n' "$packages"
         report "go list failed in $dir/: the reach of tests/Helpers was not measured"
