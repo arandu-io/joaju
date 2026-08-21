@@ -180,14 +180,6 @@ func (b *relayTestBus) Subscribe(ctx context.Context, channels []string, callbac
 	}
 }
 
-// published is what crossed one topic, in order.
-func (b *relayTestBus) published(topic string) []string {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-
-	return append([]string(nil), b.carried[topic]...)
-}
-
 func (b *relayTestBus) listeners(topic string) int {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -923,21 +915,6 @@ func fleetTestListening(t *testing.T, bus *relayTestBus, asker InstanceID, insta
 	waitFor(t, "the asking instance to be listening for answers", func() bool {
 		return bus.listeners(MetricsReplyTopic(asker)) == 1
 	})
-}
-
-// fleetTestChannelBody is what the three channel routes answer with.
-type fleetTestChannelBody struct {
-	Occupied          bool `json:"occupied"`
-	SubscriptionCount int  `json:"subscription_count"`
-	UserCount         int  `json:"user_count"`
-}
-
-func fleetTestDecode(t *testing.T, body string, into any) {
-	t.Helper()
-
-	if err := json.Unmarshal([]byte(body), into); err != nil {
-		t.Fatalf("decoding %s = %v", body, err)
-	}
 }
 
 func TestAPublishedEventReachesTheOtherInstancesOnceAndStaysInItsTenant(t *testing.T) {

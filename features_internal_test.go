@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/arandu-io/hesape/auth"
-	"github.com/arandu-io/hesape/broadcasting"
 )
 
 // The doubles below are this package's, and every test file in it shares them:
@@ -81,19 +80,6 @@ func connTestConnection(t *testing.T, tenant, user string) (*Connection, *connTe
 	}
 
 	return conn, sink
-}
-
-// connTestJoinGrant is the Grant a [SubscriptionPolicy] issues.
-func connTestJoinGrant(t *testing.T, tenant, user string) auth.Grant {
-	t.Helper()
-
-	g, err := auth.Authorize(context.Background(), connTestJoinPolicy{},
-		auth.Subject{ID: user, Tenant: tenant}, broadcasting.ChannelJoin, Subscription{})
-	if err != nil {
-		t.Fatalf("authorizing %s of %s to join: %v", user, tenant, err)
-	}
-
-	return g
 }
 
 // connFor is a connection held by user of tenant, using the same handshake
