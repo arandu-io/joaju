@@ -8,7 +8,7 @@
 //
 // Usage:
 //
-//	go run ./ws/internal/autobahn/report -reports <dir> [-out REPORT.txt]
+//	go run ./tests/Specification/report -reports <dir> [-out REPORT.txt]
 //	    [-context <preamble>] [-min-cases <n>]
 //
 // -min-cases is the guard against a truncated run. The suite exits zero when it

@@ -14,7 +14,7 @@
 // Run it with run.sh in the parent directory, which starts it, points the
 // suite at it and tears it down. Started by hand:
 //
-//	go run ./ws/internal/autobahn/echo -addr :9001
+//	go run ./tests/Specification/echo -addr :9001
 package main
 
 import (

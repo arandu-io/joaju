@@ -1,5 +1,5 @@
 Autobahn TestSuite against the ws package of github.com/arandu-io/joaju
-run at:     2026-08-20 11:16:17 UTC
+run at:     2026-08-21 00:50:28 UTC
 target:     ws://host.docker.internal:9001
 image:      crossbario/autobahn-testsuite:latest (linux/amd64)
 suite:      Autobahn 18, all cases except 12.* and 13.* (permessage-deflate,

@@ -1,23 +1,29 @@
 name: spec-tests
 
 # The conformance suite, as a gate rather than as a thing somebody remembers to
-# run. The report committed under ws/internal/autobahn/ says the date it was
+# run. The report committed under tests/Specification/ says the date it was
 # produced, which is a fact about that afternoon and not about the code on this
 # branch.
 #
 # It runs only when the transport changes. The suite drives 301 cases and group
 # 9 pushes 16 MiB per case, so making every pull request wait for it would buy
 # nothing on the ones that touch a controller.
+#
+# Two paths, not one. ws/** is the code under test and tests/Specification/** is
+# the harness that drives it, and either one changing can change the verdict --
+# leaving the harness out is how a suite stops running with nobody told.
 
 on:
   push:
     branches: [main]
     paths:
       - "ws/**"
+      - "tests/Specification/**"
       - ".github/workflows/spec-tests.yml"
   pull_request:
     paths:
       - "ws/**"
+      - "tests/Specification/**"
       - ".github/workflows/spec-tests.yml"
 
 permissions:
@@ -46,7 +52,7 @@ jobs:
           # gateway; host.docker.internal, which the committed spec names, does
           # not resolve here.
           AUTOBAHN_TARGET: 172.17.0.1:9001
-        run: ./ws/internal/autobahn/run.sh
+        run: ./tests/Specification/run.sh
 
       # The harness exits non-zero on its own when a case comes back as anything
       # but OK or NON-STRICT, so the step above is the verdict. The report is
@@ -57,7 +63,7 @@ jobs:
         with:
           name: autobahn-report
           path: |
-            ws/internal/autobahn/REPORT.txt
-            ws/internal/autobahn/reports/
+            tests/Specification/REPORT.txt
+            tests/Specification/reports/
           retention-days: 14
           if-no-files-found: warn

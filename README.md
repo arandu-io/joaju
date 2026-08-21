@@ -36,7 +36,7 @@ not a fork, no borrowed code — and `golang.org/x/net` is what its client dials
 SOCKS5 proxy with. It is measured and not asserted: Autobahn TestSuite version
 18, every case except `12.*` and `13.*` — permessage-deflate, the same pair
 `laravel/reverb` excludes — **301 cases, 0 failures**. The report is
-[`ws/internal/autobahn/REPORT.txt`](ws/internal/autobahn/REPORT.txt).
+[`tests/Specification/REPORT.txt`](tests/Specification/REPORT.txt).
 
 **No path to a channel that a policy did not open.** The server authenticates
 nobody: it reads the subject the framework's middleware put on the request and

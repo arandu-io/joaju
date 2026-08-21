@@ -6,11 +6,15 @@
 # it from a container, collects the reports and exits non-zero if any case came
 # back as anything but OK or NON-STRICT.
 #
-#   ./ws/internal/autobahn/run.sh
+#   ./tests/Specification/run.sh
 #
 # Nothing else in the repository depends on this. `go build ./...` and
 # `go test ./...` do not run it and do not need Docker; the two Go commands
 # under this directory compile on their own so the harness cannot rot unnoticed.
+#
+# It is a category of its own and not a unit, feature or end-to-end suite: the
+# runner is somebody else's, and what it checks the code against is a document
+# that is not ours.
 #
 # # The target, and what is excluded
 #
@@ -48,7 +52,7 @@
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-root="$(cd "${here}/../../.." && pwd)"
+root="$(cd "${here}/../.." && pwd)"
 
 port="${AUTOBAHN_PORT:-9001}"
 target="${AUTOBAHN_TARGET:-host.docker.internal:${port}}"
@@ -83,7 +87,7 @@ mkdir -p "${work}" "${reports}"
 # killing the parent leaves the child holding the port, which turns the next run
 # into a mystery.
 log "building the echo server"
-( cd "${root}" && go build -o "${work}/echo" ./ws/internal/autobahn/echo )
+( cd "${root}" && go build -o "${work}/echo" ./tests/Specification/echo )
 
 log "starting the echo server on :${port}"
 "${work}/echo" -addr ":${port}" >"${work}/echo.log" 2>&1 &
@@ -151,6 +155,6 @@ pass rule:  OK or NON-STRICT, and a closing handshake of OK or INFORMATIONAL
 
 "
 
-( cd "${root}" && go run ./ws/internal/autobahn/report \
+( cd "${root}" && go run ./tests/Specification/report \
     -reports "${reports}" -out "${here}/REPORT.txt" \
     -min-cases "${expected_cases}" -context "${context}" )
