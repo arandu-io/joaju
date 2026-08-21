@@ -17,6 +17,6 @@ go 1.26
 // pub/sub that lets two instances agree on who is connected where.
 
 require (
-	github.com/arandu-io/hesape v0.11.0
+	github.com/arandu-io/hesape v0.12.0
 	golang.org/x/net v0.26.0
 )
