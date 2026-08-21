@@ -87,6 +87,17 @@ jobs:
             exit 1
           fi
 
+      # ADR-0075, checked rather than remembered. The first of its four checks is
+      # the one that has to be mechanical: a file named BrokerTest.go or
+      # view_Test.go is production code, `go test` runs nothing inside it, and it
+      # says so with no error and no warning. Nothing else here would notice.
+      #
+      # Once, not per module: the guard reads what git tracks and answers for the
+      # whole repository, redis/ included.
+      - name: test layout
+        if: matrix.module == '.'
+        run: bash tests/test-layout-guard.sh
+
       # With the tags, because without them the two suites that need something
       # running -- tests/Integration, which needs a RESP server, and tests/E2E,
       # which needs a JavaScript runtime -- are not compiled at all, and a suite
