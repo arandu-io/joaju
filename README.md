@@ -16,10 +16,10 @@
 
 ## About the WebSocket server
 
-The wire format is the Pusher protocol, so a browser client that already talks
-to Pusher or to Reverb talks to this. Nine HTTP routes and six kinds of channel,
-carrying the names Reverb uses, because a reader who knows Reverb should
-recognize this repository without reading it first.
+The wire format is the Pusher protocol, so a browser client that already speaks
+it speaks to this. Nine HTTP routes and six kinds of channel — public, private,
+presence, and the cache variant of each — under the names the protocol already
+defines, because a client written against it should need nothing new here.
 
 It is one library and two deployments. `Server` is an `http.Handler`, so an
 Arandu application mounts it behind its own middleware and its own policies;
@@ -31,11 +31,11 @@ container image runs.
 **Nothing in the dependency graph that is not ours or the standard library's.**
 The root `go.mod` requires `github.com/arandu-io/hesape` and
 `golang.org/x/net`, and a CI step fails the build on anything outside
-`arandu-io` and `golang.org/x`. Subpackage `ws` is this project's own RFC 6455 —
-not a fork, no borrowed code — and `golang.org/x/net` is what its client dials a
-SOCKS5 proxy with. It is measured and not asserted: Autobahn TestSuite version
-18, every case except `12.*` and `13.*` — permessage-deflate, the same pair
-`laravel/reverb` excludes — **301 cases, 0 failures**. The report is
+`arandu-io` and `golang.org/x`. Subpackage `ws` is the RFC 6455 transport, in
+the tree rather than in the graph, and `golang.org/x/net` is what its client
+dials a SOCKS5 proxy with. It is measured and not asserted: Autobahn TestSuite
+version 18, every case except `12.*` and `13.*` — permessage-deflate, which the
+server does not negotiate — **301 cases, 0 failures**. The report is
 [`tests/Specification/REPORT.txt`](tests/Specification/REPORT.txt).
 
 **No path to a channel that a policy did not open.** The server authenticates
@@ -61,7 +61,7 @@ rather than failing a request. The bus is RESP pub/sub, in the `redis/`
 submodule — its own `go.mod`, because the driver under it is third-party and Go
 has no optional dependency.
 
-9,114 lines of production code and 8,176 of test.
+11,318 lines of production code and 14,885 of test.
 
 ## Install
 
@@ -131,8 +131,9 @@ next phase, and it will be an Arandu application.
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md). Before opening a pull request, the three
-commands at the top of that file have to pass, and CI runs exactly them.
+See [CONTRIBUTING.md](CONTRIBUTING.md). Before opening a pull request, the four
+commands at the top of that file have to pass, and CI runs them plus the ones a
+laptop cannot: a dependency in the graph, a known vulnerability, a `package.json`.
 
 ## Security Vulnerabilities
 
