@@ -18,5 +18,5 @@ go 1.26
 
 require (
 	github.com/arandu-io/hesape v0.12.0
-	golang.org/x/net v0.26.0
+	golang.org/x/net v0.58.0
 )
