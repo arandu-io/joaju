@@ -4,19 +4,16 @@ go 1.26
 
 // ws/ is this project's own WebSocket implementation of RFC 6455, and it is the
 // reason the dependency list is as short as it is: the surface the server uses
-// is ten symbols, and taking a library for them would bring a client stack, a
-// buffer pool and permessage-deflate along with it.
+// is nineteen names -- twelve of the package and seven methods of Conn -- and
+// taking a library for them would bring a client stack, a buffer pool and
+// permessage-deflate along with it.
 //
-// golang.org/x/net is what ws/proxy.go dials a SOCKS5 proxy with, and it is the
-// one import here that is neither this project's nor the standard library's. It
-// is confined to the client half of the transport: nothing the server does
-// reaches it.
+// The standard library is the whole of it. There was a second import,
+// golang.org/x/net, for a SOCKS5 proxy dialer that only the client half used;
+// it left with the file that called it, and nothing the server does needed it.
 //
 // The collection arrives when the server does: auth.Grant, because subscribing
 // to a channel is a read and RULE 17 has no exception, and redis for the
 // pub/sub that lets two instances agree on who is connected where.
 
-require (
-	github.com/arandu-io/hesape v0.12.0
-	golang.org/x/net v0.26.0
-)
+require github.com/arandu-io/hesape v0.12.0

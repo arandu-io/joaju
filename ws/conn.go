@@ -1,1330 +1,376 @@
-// Copyright 2013 The HYZIS WebSocket Authors. All rights reserved.
-// Use of this source code is governed by a BSD-style
-// license that can be found in the LICENSE file.
-
 package ws
 
 import (
 	"bufio"
-	"crypto/rand"
-	"encoding/binary"
 	"errors"
-	"io"
+	"fmt"
 	"net"
-	"strconv"
-	"strings"
 	"sync"
 	"time"
-	"unicode/utf8"
 )
 
-const (
-	// Frame header byte 0 bits from Section 5.2 of RFC 6455
-	finalBit = 1 << 7
-	rsv1Bit  = 1 << 6
-	rsv2Bit  = 1 << 5
-	rsv3Bit  = 1 << 4
+// ErrCloseSent is a write attempted after the close frame went out.
+//
+// Section 5.5.1 is explicit: after sending a close, an endpoint must not send
+// any more data frames. Returning an error rather than writing anyway is what
+// keeps a shutdown from racing a broadcast into a frame the peer must reject.
+var ErrCloseSent = errors.New("ws: the close frame was already sent")
 
-	// Frame header byte 1 bits from Section 5.2 of RFC 6455
-	maskBit = 1 << 7
-
-	maxFrameHeaderSize         = 2 + 8 + 4 // Fixed header + length + mask
-	maxControlFramePayloadSize = 125
-
-	writeWait = time.Second
-
-	defaultReadBufferSize  = 4096
-	defaultWriteBufferSize = 4096
-
-	continuationFrame = 0
-	noFrame           = -1
-)
-
-// Close codes defined in RFC 6455, section 11.7.
-const (
-	CloseNormalClosure           = 1000
-	CloseGoingAway               = 1001
-	CloseProtocolError           = 1002
-	CloseUnsupportedData         = 1003
-	CloseNoStatusReceived        = 1005
-	CloseAbnormalClosure         = 1006
-	CloseInvalidFramePayloadData = 1007
-	ClosePolicyViolation         = 1008
-	CloseMessageTooBig           = 1009
-	CloseMandatoryExtension      = 1010
-	CloseInternalServerErr       = 1011
-	CloseServiceRestart          = 1012
-	CloseTryAgainLater           = 1013
-	CloseTLSHandshake            = 1015
-)
-
-// The message types are defined in RFC 6455, section 11.8.
-const (
-	// TextMessage denotes a text data message. The text message payload is
-	// interpreted as UTF-8 encoded text data.
-	TextMessage = 1
-
-	// BinaryMessage denotes a binary data message.
-	BinaryMessage = 2
-
-	// CloseMessage denotes a close control message. The optional message
-	// payload contains a numeric code and text. Use the FormatCloseMessage
-	// function to format a close message payload.
-	CloseMessage = 8
-
-	// PingMessage denotes a ping control message. The optional message payload
-	// is UTF-8 encoded text.
-	PingMessage = 9
-
-	// PongMessage denotes a pong control message. The optional message payload
-	// is UTF-8 encoded text.
-	PongMessage = 10
-)
-
-// ErrCloseSent is returned when the application writes a message to the
-// connection after sending a close message.
-var ErrCloseSent = errors.New("websocket: close sent")
-
-// ErrReadLimit is returned when reading a message that is larger than the
-// read limit set for the connection.
-var ErrReadLimit = errors.New("websocket: read limit exceeded")
-
-// netError satisfies the net Error interface.
-type netError struct {
-	msg       string
-	temporary bool
-	timeout   bool
-}
-
-func (e *netError) Error() string   { return e.msg }
-func (e *netError) Temporary() bool { return e.temporary }
-func (e *netError) Timeout() bool   { return e.timeout }
-
-// CloseError represents a close message.
+// CloseError is the peer closing, with the code and reason it gave.
+//
+// It comes out of [Conn.ReadMessage] as an error because that is the only way a
+// reader finds out, and it carries the code because the difference between 1000
+// and 1009 is the difference between a client that finished and a client that
+// was cut off.
 type CloseError struct {
-	// Code is defined in RFC 6455, section 11.7.
+	// Code is one of the Close* constants, or an application code in the
+	// 3000-4999 range. It is [CloseNoStatusReceived] when the close frame
+	// carried no code, and [CloseAbnormalClosure] when the connection ended
+	// with no close frame at all.
 	Code int
-
-	// Text is the optional text payload.
-	Text string
+	// Reason is the peer's text, which is often empty.
+	Reason string
 }
 
 func (e *CloseError) Error() string {
-	s := []byte("websocket: close ")
-	s = strconv.AppendInt(s, int64(e.Code), 10)
-	switch e.Code {
-	case CloseNormalClosure:
-		s = append(s, " (normal)"...)
-	case CloseGoingAway:
-		s = append(s, " (going away)"...)
-	case CloseProtocolError:
-		s = append(s, " (protocol error)"...)
-	case CloseUnsupportedData:
-		s = append(s, " (unsupported data)"...)
-	case CloseNoStatusReceived:
-		s = append(s, " (no status)"...)
-	case CloseAbnormalClosure:
-		s = append(s, " (abnormal closure)"...)
-	case CloseInvalidFramePayloadData:
-		s = append(s, " (invalid payload data)"...)
-	case ClosePolicyViolation:
-		s = append(s, " (policy violation)"...)
-	case CloseMessageTooBig:
-		s = append(s, " (message too big)"...)
-	case CloseMandatoryExtension:
-		s = append(s, " (mandatory extension missing)"...)
-	case CloseInternalServerErr:
-		s = append(s, " (internal server error)"...)
-	case CloseTLSHandshake:
-		s = append(s, " (TLS handshake error)"...)
+	if e.Reason == "" {
+		return fmt.Sprintf("ws: the peer closed the connection with code %d", e.Code)
 	}
-	if e.Text != "" {
-		s = append(s, ": "...)
-		s = append(s, e.Text...)
-	}
-	return string(s)
+
+	return fmt.Sprintf("ws: the peer closed the connection with code %d: %s", e.Code, e.Reason)
 }
 
-// IsCloseError returns boolean indicating whether the error is a *CloseError
-// with one of the specified codes.
-func IsCloseError(err error, codes ...int) bool {
-	if e, ok := err.(*CloseError); ok {
-		for _, code := range codes {
-			if e.Code == code {
-				return true
-			}
+// IsUnexpectedClose reports whether err is the peer closing with a code that is
+// not in expected.
+//
+// It is the guard around logging. A client navigating away sends 1001 and a
+// client finishing sends 1000, and neither is worth a line in a log -- on a
+// server with ten thousand sockets they are the log. What is worth a line is
+// 1002, 1009 or a connection that ended with no close frame at all.
+//
+// Anything that is not a [CloseError] returns false: a read that failed on a
+// deadline or a reset is a transport error, and the caller already has it.
+func IsUnexpectedClose(err error, expected ...int) bool {
+	var closeErr *CloseError
+	if !errors.As(err, &closeErr) {
+		return false
+	}
+	for _, code := range expected {
+		if closeErr.Code == code {
+			return false
 		}
 	}
-	return false
+
+	return true
 }
 
-// IsUnexpectedCloseError returns boolean indicating whether the error is a
-// *CloseError with a code not in the list of expected codes.
-func IsUnexpectedCloseError(err error, expectedCodes ...int) bool {
-	if e, ok := err.(*CloseError); ok {
-		for _, code := range expectedCodes {
-			if e.Code == code {
-				return false
-			}
-		}
-		return true
-	}
-	return false
-}
-
-var (
-	errWriteTimeout        = &netError{msg: "websocket: write timeout", timeout: true, temporary: true}
-	errUnexpectedEOF       = &CloseError{Code: CloseAbnormalClosure, Text: io.ErrUnexpectedEOF.Error()}
-	errBadWriteOpCode      = errors.New("websocket: bad write message type")
-	errWriteClosed         = errors.New("websocket: write closed")
-	errInvalidControlFrame = errors.New("websocket: invalid control frame")
-)
-
-// maskRand is an io.Reader for generating mask bytes. The reader is initialized
-// to crypto/rand Reader. Tests swap the reader to a math/rand reader for
-// reproducible results.
-var maskRand = rand.Reader
-
-// newMaskKey returns a new 32 bit value for masking client frames.
-func newMaskKey() [4]byte {
-	var k [4]byte
-	_, _ = io.ReadFull(maskRand, k[:])
-	return k
-}
-
-func isControl(frameType int) bool {
-	return frameType == CloseMessage || frameType == PingMessage || frameType == PongMessage
-}
-
-func isData(frameType int) bool {
-	return frameType == TextMessage || frameType == BinaryMessage
-}
-
-var validReceivedCloseCodes = map[int]bool{
-	// see http://www.iana.org/assignments/websocket/websocket.xhtml#close-code-number
-
-	CloseNormalClosure:           true,
-	CloseGoingAway:               true,
-	CloseProtocolError:           true,
-	CloseUnsupportedData:         true,
-	CloseNoStatusReceived:        false,
-	CloseAbnormalClosure:         false,
-	CloseInvalidFramePayloadData: true,
-	ClosePolicyViolation:         true,
-	CloseMessageTooBig:           true,
-	CloseMandatoryExtension:      true,
-	CloseInternalServerErr:       true,
-	CloseServiceRestart:          true,
-	CloseTryAgainLater:           true,
-	CloseTLSHandshake:            false,
-}
-
-func isValidReceivedCloseCode(code int) bool {
-	return validReceivedCloseCodes[code] || (code >= 3000 && code <= 4999)
-}
-
-// BufferPool represents a pool of buffers. The *sync.Pool type satisfies this
-// interface.  The type of the value stored in a pool is not specified.
-type BufferPool interface {
-	// Get gets a value from the pool or returns nil if the pool is empty.
-	Get() interface{}
-	// Put adds a value to the pool.
-	Put(interface{})
-}
-
-// writePoolData is the type added to the write buffer pool. This wrapper is
-// used to prevent applications from peeking at and depending on the values
-// added to the pool.
-type writePoolData struct{ buf []byte }
-
-// The Conn type represents a WebSocket connection.
+// Conn is one WebSocket connection.
+//
+// # Concurrency
+//
+// One goroutine reads and any number write. [Conn.ReadMessage] is NOT safe to
+// call from two goroutines -- it carries the state of a fragmented message and
+// of the UTF-8 check across calls -- and every write path takes a mutex, because
+// two frames interleaved on one socket is a protocol violation the peer cannot
+// recover from.
+//
+// The asymmetry is deliberate and it is what the read loop needs: answering a
+// ping is a write, and it happens on the reading goroutine while another
+// goroutine may be broadcasting.
 type Conn struct {
-	conn        net.Conn
-	isServer    bool
-	subprotocol string
+	conn     net.Conn
+	br       *bufio.Reader
+	bw       *bufio.Writer
+	isClient bool
 
-	// Write fields
-	mu            chan struct{} // used as mutex to protect write to conn
-	writeBuf      []byte        // frame is constructed in this buffer.
-	writePool     BufferPool
-	writeBufSize  int
-	writeDeadline time.Time
-	writer        io.WriteCloser // the current writer returned to the application
-	isWriting     bool           // for best-effort concurrent write detection
+	// The read half. Owned by the one goroutine that calls ReadMessage.
+	readLimit  int64
+	fragOpcode int
+	validator  utf8Validator
+	readErr    error
+	pong       func(string) error
 
-	writeErrMu sync.Mutex
-	writeErr   error
-
-	enableWriteCompression bool
-	compressionLevel       int
-	newCompressionWriter   func(io.WriteCloser, int) io.WriteCloser
-
-	// Read fields
-	reader  io.ReadCloser // the current reader returned to the application
-	readErr error
-	br      *bufio.Reader
-	// bytes remaining in current frame.
-	// set setReadRemaining to safely update this value and prevent overflow
-	readRemaining int64
-	readFinal     bool  // true the current message has more frames.
-	readLength    int64 // Message size.
-	readLimit     int64 // Maximum message size.
-	readMaskPos   int
-	readMaskKey   [4]byte
-	handlePong    func(string) error
-	handlePing    func(string) error
-	handleClose   func(int, string) error
-	readErrCount  int
-	messageReader *messageReader // the current low-level reader
-
-	readDecompress         bool // whether last read frame had RSV1 set
-	newDecompressionReader func(io.Reader) io.ReadCloser
+	// The write half, guarded by mu.
+	mu        sync.Mutex
+	closeSent bool
 }
 
-func newConn(conn net.Conn, isServer bool, readBufferSize, writeBufferSize int, writeBufferPool BufferPool, br *bufio.Reader, writeBuf []byte) *Conn {
-
-	if br == nil {
-		if readBufferSize == 0 {
-			readBufferSize = defaultReadBufferSize
-		} else if readBufferSize < maxControlFramePayloadSize {
-			// must be large enough for control frame
-			readBufferSize = maxControlFramePayloadSize
-		}
-		br = bufio.NewReaderSize(conn, readBufferSize)
+// newConn wraps a hijacked or dialled connection.
+//
+// br is the reader the hijack returned, and using it rather than a fresh one is
+// not an optimisation: net/http may have already read bytes past the request
+// into that buffer, and a new reader would start after them. On a websocket the
+// client is allowed to send its first frame immediately, so those bytes are
+// often the first frame.
+func newConn(conn net.Conn, br *bufio.Reader, writeBuffer int, isClient bool) *Conn {
+	if writeBuffer <= 0 {
+		writeBuffer = defaultBufferSize
 	}
 
-	if writeBufferSize <= 0 {
-		writeBufferSize = defaultWriteBufferSize
+	return &Conn{
+		conn:     conn,
+		br:       br,
+		bw:       bufio.NewWriterSize(conn, writeBuffer),
+		isClient: isClient,
 	}
-	writeBufferSize += maxFrameHeaderSize
-
-	if writeBuf == nil && writeBufferPool == nil {
-		writeBuf = make([]byte, writeBufferSize)
-	}
-
-	mu := make(chan struct{}, 1)
-	mu <- struct{}{}
-	c := &Conn{
-		isServer:               isServer,
-		br:                     br,
-		conn:                   conn,
-		mu:                     mu,
-		readFinal:              true,
-		writeBuf:               writeBuf,
-		writePool:              writeBufferPool,
-		writeBufSize:           writeBufferSize,
-		enableWriteCompression: true,
-		compressionLevel:       defaultCompressionLevel,
-	}
-	c.SetCloseHandler(nil)
-	c.SetPingHandler(nil)
-	c.SetPongHandler(nil)
-	return c
 }
 
-// setReadRemaining tracks the number of bytes remaining on the connection. If n
-// overflows, an ErrReadLimit is returned.
-func (c *Conn) setReadRemaining(n int64) error {
-	if n < 0 {
-		return ErrReadLimit
+// defaultBufferSize is what a connection uses when none is configured.
+//
+// Four kilobytes, because the traffic this server carries is JSON events of a
+// few hundred bytes: a bigger buffer per socket is memory multiplied by the
+// connection count for no fewer syscalls.
+const defaultBufferSize = 4096
+
+// SetReadLimit caps one message, counting every fragment of it.
+//
+// Zero is no limit. The limit is checked against the length the peer declared in
+// the header, so an oversized message costs a refusal and never an allocation --
+// which is the point: without it there is nothing to refuse the message with,
+// and a peer that declares a terabyte holds the connection open for as long as
+// it keeps sending one.
+func (c *Conn) SetReadLimit(n int64) { c.readLimit = n }
+
+// SetReadDeadline is the net.Conn deadline, and it is how a dead peer is
+// noticed.
+//
+// A TCP connection to a machine that vanished stays open until the OS gives up,
+// which can be hours. A read deadline that the caller pushes forward on every
+// frame turns silence into an error in seconds.
+func (c *Conn) SetReadDeadline(t time.Time) error { return c.conn.SetReadDeadline(t) }
+
+// SetWriteDeadline is the net.Conn deadline for writes.
+func (c *Conn) SetWriteDeadline(t time.Time) error { return c.conn.SetWriteDeadline(t) }
+
+// SetPongHandler registers what runs when a pong arrives, with its payload.
+//
+// A pong is the answer to this server's ping and it is the proof the peer is
+// alive, so the handler is where the read deadline gets pushed forward. It runs
+// on the reading goroutine, before [Conn.ReadMessage] returns, and an error from
+// it fails the read -- a deadline that could not be set is a connection that
+// would hang.
+func (c *Conn) SetPongHandler(h func(appData string) error) { c.pong = h }
+
+// LocalAddr and RemoteAddr are the underlying connection's.
+func (c *Conn) LocalAddr() net.Addr  { return c.conn.LocalAddr() }
+func (c *Conn) RemoteAddr() net.Addr { return c.conn.RemoteAddr() }
+
+// Close closes the underlying connection without a close frame.
+//
+// It is the abrupt end, for a caller that already gave up. The orderly one is
+// WriteMessage with [CloseMessage] followed by this.
+func (c *Conn) Close() error { return c.conn.Close() }
+
+// ReadMessage reads the next data message, joining its fragments.
+//
+// Control frames are handled here and never returned: a ping is answered, a
+// pong reaches the handler, and a close is echoed and becomes a [CloseError].
+// The caller sees messages, which is what a caller wants -- the alternative is
+// every caller in the codebase writing the same switch.
+//
+// After any error, every later call returns that same error. A failed websocket
+// cannot be resynchronised: the framing is a stream, and a frame boundary once
+// lost is lost.
+func (c *Conn) ReadMessage() (messageType int, p []byte, err error) {
+	if c.readErr != nil {
+		return 0, nil, c.readErr
 	}
 
-	c.readRemaining = n
-	return nil
-}
+	var (
+		message []byte
+		opcode  int
+	)
 
-// Subprotocol returns the negotiated protocol for the connection.
-func (c *Conn) Subprotocol() string {
-	return c.subprotocol
-}
-
-// Close closes the underlying network connection without sending or waiting
-// for a close message.
-func (c *Conn) Close() error {
-	return c.conn.Close()
-}
-
-// LocalAddr returns the local network address.
-func (c *Conn) LocalAddr() net.Addr {
-	return c.conn.LocalAddr()
-}
-
-// RemoteAddr returns the remote network address.
-func (c *Conn) RemoteAddr() net.Addr {
-	return c.conn.RemoteAddr()
-}
-
-// Write methods
-
-func (c *Conn) writeFatal(err error) error {
-	c.writeErrMu.Lock()
-	if c.writeErr == nil {
-		c.writeErr = err
-	}
-	c.writeErrMu.Unlock()
-	return err
-}
-
-func (c *Conn) read(n int) ([]byte, error) {
-	p, err := c.br.Peek(n)
-	if err == io.EOF {
-		err = errUnexpectedEOF
-	}
-	// Discard is guaranteed to succeed because the number of bytes to discard
-	// is less than or equal to the number of bytes buffered.
-	_, _ = c.br.Discard(len(p))
-	return p, err
-}
-
-func (c *Conn) write(frameType int, deadline time.Time, buf0, buf1 []byte) error {
-	<-c.mu
-	defer func() { c.mu <- struct{}{} }()
-
-	c.writeErrMu.Lock()
-	err := c.writeErr
-	c.writeErrMu.Unlock()
-	if err != nil {
-		return err
-	}
-
-	if err := c.conn.SetWriteDeadline(deadline); err != nil {
-		return c.writeFatal(err)
-	}
-	if len(buf1) == 0 {
-		_, err = c.conn.Write(buf0)
-	} else {
-		err = c.writeBufs(buf0, buf1)
-	}
-	if err != nil {
-		return c.writeFatal(err)
-	}
-	if frameType == CloseMessage {
-		_ = c.writeFatal(ErrCloseSent)
-	}
-	return nil
-}
-
-func (c *Conn) writeBufs(bufs ...[]byte) error {
-	b := net.Buffers(bufs)
-	_, err := b.WriteTo(c.conn)
-	return err
-}
-
-// WriteControl writes a control message with the given deadline. The allowed
-// message types are CloseMessage, PingMessage and PongMessage.
-func (c *Conn) WriteControl(messageType int, data []byte, deadline time.Time) error {
-	if !isControl(messageType) {
-		return errBadWriteOpCode
-	}
-	if len(data) > maxControlFramePayloadSize {
-		return errInvalidControlFrame
-	}
-
-	b0 := byte(messageType) | finalBit
-	b1 := byte(len(data))
-	if !c.isServer {
-		b1 |= maskBit
-	}
-
-	buf := make([]byte, 0, maxFrameHeaderSize+maxControlFramePayloadSize)
-	buf = append(buf, b0, b1)
-
-	if c.isServer {
-		buf = append(buf, data...)
-	} else {
-		key := newMaskKey()
-		buf = append(buf, key[:]...)
-		buf = append(buf, data...)
-		maskBytes(key, 0, buf[6:])
-	}
-
-	if deadline.IsZero() {
-		// No timeout for zero time.
-		<-c.mu
-	} else {
-		d := time.Until(deadline)
-		if d < 0 {
-			return errWriteTimeout
-		}
-		select {
-		case <-c.mu:
-		default:
-			timer := time.NewTimer(d)
-			select {
-			case <-c.mu:
-				timer.Stop()
-			case <-timer.C:
-				return errWriteTimeout
+	for {
+		limit := c.readLimit
+		if limit > 0 {
+			limit -= int64(len(message))
+			if limit <= 0 {
+				return 0, nil, c.failRead(ErrTooLarge)
 			}
 		}
-	}
 
-	defer func() { c.mu <- struct{}{} }()
+		frame, err := ReadFrame(c.br, !c.isClient, limit)
+		if err != nil {
+			return 0, nil, c.failRead(err)
+		}
 
-	c.writeErrMu.Lock()
-	err := c.writeErr
-	c.writeErrMu.Unlock()
-	if err != nil {
-		return err
-	}
+		if frame.Control() {
+			if err := c.control(frame); err != nil {
+				return 0, nil, err
+			}
+			continue
+		}
 
-	if err := c.conn.SetWriteDeadline(deadline); err != nil {
-		return c.writeFatal(err)
-	}
-	if _, err = c.conn.Write(buf); err != nil {
-		return c.writeFatal(err)
-	}
-	if messageType == CloseMessage {
-		_ = c.writeFatal(ErrCloseSent)
-	}
-	return err
-}
+		switch {
+		case frame.Opcode == ContinuationFrame:
+			if c.fragOpcode == 0 {
+				return 0, nil, c.failRead(fmt.Errorf("%w: a continuation arrived with no message open", ErrBadFragment))
+			}
+			opcode = c.fragOpcode
+		case c.fragOpcode != 0:
+			return 0, nil, c.failRead(fmt.Errorf("%w: a new data frame arrived while a message was still open", ErrBadFragment))
+		default:
+			opcode = frame.Opcode
+			c.validator.reset()
+		}
 
-// beginMessage prepares a connection and message writer for a new message.
-func (c *Conn) beginMessage(mw *messageWriter, messageType int) error {
-	// Close previous writer if not already closed by the application. It's
-	// probably better to return an error in this situation, but we cannot
-	// change this without breaking existing applications.
-	if c.writer != nil {
-		c.writer.Close()
-		c.writer = nil
-	}
+		// Text is checked as it arrives, fragment by fragment, so that a bad
+		// byte fails the connection at once instead of after the last fragment
+		// of a message that may be enormous (section 8.1).
+		if opcode == TextMessage && !c.validator.write(frame.Payload) {
+			return 0, nil, c.failRead(ErrBadUTF8)
+		}
 
-	if !isControl(messageType) && !isData(messageType) {
-		return errBadWriteOpCode
-	}
-
-	c.writeErrMu.Lock()
-	err := c.writeErr
-	c.writeErrMu.Unlock()
-	if err != nil {
-		return err
-	}
-
-	mw.c = c
-	mw.frameType = messageType
-	mw.pos = maxFrameHeaderSize
-
-	if c.writeBuf == nil {
-		wpd, ok := c.writePool.Get().(writePoolData)
-		if ok {
-			c.writeBuf = wpd.buf
+		if message == nil && frame.Final {
+			// The whole message in one frame, which is the common case. The
+			// payload is already a slice of its own, so it is handed over
+			// rather than copied.
+			message = frame.Payload
 		} else {
-			c.writeBuf = make([]byte, c.writeBufSize)
+			message = append(message, frame.Payload...)
 		}
-	}
-	return nil
-}
 
-// NextWriter returns a writer for the next message to send. The writer's Close
-// method flushes the complete message to the network.
-//
-// There can be at most one open writer on a connection. NextWriter closes the
-// previous writer if the application has not already done so.
-//
-// All message types (TextMessage, BinaryMessage, CloseMessage, PingMessage and
-// PongMessage) are supported.
-func (c *Conn) NextWriter(messageType int) (io.WriteCloser, error) {
-	var mw messageWriter
-	if err := c.beginMessage(&mw, messageType); err != nil {
-		return nil, err
-	}
-	c.writer = &mw
-	if c.newCompressionWriter != nil && c.enableWriteCompression && isData(messageType) {
-		w := c.newCompressionWriter(c.writer, c.compressionLevel)
-		mw.compress = true
-		c.writer = w
-	}
-	return c.writer, nil
-}
-
-type messageWriter struct {
-	c         *Conn
-	compress  bool // whether next call to flushFrame should set RSV1
-	pos       int  // end of data in writeBuf.
-	frameType int  // type of the current frame.
-	err       error
-}
-
-func (w *messageWriter) endMessage(err error) error {
-	if w.err != nil {
-		return err
-	}
-	c := w.c
-	w.err = err
-	c.writer = nil
-	if c.writePool != nil {
-		c.writePool.Put(writePoolData{buf: c.writeBuf})
-		c.writeBuf = nil
-	}
-	return err
-}
-
-// flushFrame writes buffered data and extra as a frame to the network. The
-// final argument indicates that this is the last frame in the message.
-func (w *messageWriter) flushFrame(final bool, extra []byte) error {
-	c := w.c
-	length := w.pos - maxFrameHeaderSize + len(extra)
-
-	// Check for invalid control frames.
-	if isControl(w.frameType) &&
-		(!final || length > maxControlFramePayloadSize) {
-		return w.endMessage(errInvalidControlFrame)
-	}
-
-	b0 := byte(w.frameType)
-	if final {
-		b0 |= finalBit
-	}
-	if w.compress {
-		b0 |= rsv1Bit
-	}
-	w.compress = false
-
-	b1 := byte(0)
-	if !c.isServer {
-		b1 |= maskBit
-	}
-
-	// Assume that the frame starts at beginning of c.writeBuf.
-	framePos := 0
-	if c.isServer {
-		// Adjust up if mask not included in the header.
-		framePos = 4
-	}
-
-	switch {
-	case length >= 65536:
-		c.writeBuf[framePos] = b0
-		c.writeBuf[framePos+1] = b1 | 127
-		binary.BigEndian.PutUint64(c.writeBuf[framePos+2:], uint64(length))
-	case length > 125:
-		framePos += 6
-		c.writeBuf[framePos] = b0
-		c.writeBuf[framePos+1] = b1 | 126
-		binary.BigEndian.PutUint16(c.writeBuf[framePos+2:], uint16(length))
-	default:
-		framePos += 8
-		c.writeBuf[framePos] = b0
-		c.writeBuf[framePos+1] = b1 | byte(length)
-	}
-
-	if !c.isServer {
-		key := newMaskKey()
-		copy(c.writeBuf[maxFrameHeaderSize-4:], key[:])
-		maskBytes(key, 0, c.writeBuf[maxFrameHeaderSize:w.pos])
-		if len(extra) > 0 {
-			return w.endMessage(c.writeFatal(errors.New("websocket: internal error, extra used in client mode")))
+		if !frame.Final {
+			c.fragOpcode = opcode
+			continue
 		}
+
+		c.fragOpcode = 0
+		if opcode == TextMessage && !c.validator.complete() {
+			// Every byte was legal and the message still ends mid-rune.
+			return 0, nil, c.failRead(ErrBadUTF8)
+		}
+
+		return opcode, message, nil
 	}
+}
 
-	// Write the buffers to the connection with best-effort detection of
-	// concurrent writes. See the concurrency section in the package
-	// documentation for more info.
+// control handles a ping, a pong or a close.
+func (c *Conn) control(frame Frame) error {
+	switch frame.Opcode {
+	case PingMessage:
+		// The pong must carry the ping's payload back, byte for byte
+		// (section 5.5.3). A write failure here is not fatal to the read: the
+		// peer will time out its own ping, and the next read reports whatever
+		// actually broke.
+		_ = c.write(Frame{Final: true, Opcode: PongMessage, Payload: frame.Payload})
 
-	if c.isWriting {
-		panic("concurrent write to websocket connection")
-	}
-	c.isWriting = true
+		return nil
 
-	err := c.write(w.frameType, c.writeDeadline, c.writeBuf[framePos:w.pos], extra)
+	case PongMessage:
+		if c.pong == nil {
+			return nil
+		}
+		if err := c.pong(string(frame.Payload)); err != nil {
+			c.readErr = err
 
-	if !c.isWriting {
-		panic("concurrent write to websocket connection")
-	}
-	c.isWriting = false
+			return err
+		}
 
-	if err != nil {
-		return w.endMessage(err)
-	}
-
-	if final {
-		_ = w.endMessage(errWriteClosed)
 		return nil
 	}
 
-	// Setup for next frame.
-	w.pos = maxFrameHeaderSize
-	w.frameType = continuationFrame
-	return nil
-}
-
-func (w *messageWriter) ncopy(max int) (int, error) {
-	n := len(w.c.writeBuf) - w.pos
-	if n <= 0 {
-		if err := w.flushFrame(false, nil); err != nil {
-			return 0, err
-		}
-		n = len(w.c.writeBuf) - w.pos
-	}
-	if n > max {
-		n = max
-	}
-	return n, nil
-}
-
-func (w *messageWriter) Write(p []byte) (int, error) {
-	if w.err != nil {
-		return 0, w.err
-	}
-
-	if len(p) > 2*len(w.c.writeBuf) && w.c.isServer {
-		// Don't buffer large messages.
-		err := w.flushFrame(false, p)
-		if err != nil {
-			return 0, err
-		}
-		return len(p), nil
-	}
-
-	nn := len(p)
-	for len(p) > 0 {
-		n, err := w.ncopy(len(p))
-		if err != nil {
-			return 0, err
-		}
-		copy(w.c.writeBuf[w.pos:], p[:n])
-		w.pos += n
-		p = p[n:]
-	}
-	return nn, nil
-}
-
-func (w *messageWriter) WriteString(p string) (int, error) {
-	if w.err != nil {
-		return 0, w.err
-	}
-
-	nn := len(p)
-	for len(p) > 0 {
-		n, err := w.ncopy(len(p))
-		if err != nil {
-			return 0, err
-		}
-		copy(w.c.writeBuf[w.pos:], p[:n])
-		w.pos += n
-		p = p[n:]
-	}
-	return nn, nil
-}
-
-func (w *messageWriter) ReadFrom(r io.Reader) (nn int64, err error) {
-	if w.err != nil {
-		return 0, w.err
-	}
-	for {
-		if w.pos == len(w.c.writeBuf) {
-			err = w.flushFrame(false, nil)
-			if err != nil {
-				break
-			}
-		}
-		var n int
-		n, err = r.Read(w.c.writeBuf[w.pos:])
-		w.pos += n
-		nn += int64(n)
-		if err != nil {
-			if err == io.EOF {
-				err = nil
-			}
-			break
-		}
-	}
-	return nn, err
-}
-
-func (w *messageWriter) Close() error {
-	if w.err != nil {
-		return w.err
-	}
-	return w.flushFrame(true, nil)
-}
-
-// WritePreparedMessage writes prepared message into connection.
-func (c *Conn) WritePreparedMessage(pm *PreparedMessage) error {
-	frameType, frameData, err := pm.frame(prepareKey{
-		isServer:         c.isServer,
-		compress:         c.newCompressionWriter != nil && c.enableWriteCompression && isData(pm.messageType),
-		compressionLevel: c.compressionLevel,
-	})
+	code, reason, err := ParseClose(frame.Payload)
 	if err != nil {
+		return c.failRead(err)
+	}
+
+	// The close is echoed before the socket goes away, which is what completes
+	// the handshake of section 5.5.1. The code is sent back unless the peer sent
+	// none, in which case there is nothing to echo and 1000 is the answer.
+	echo := code
+	if echo == CloseNoStatusReceived {
+		echo = CloseNormalClosure
+	}
+	_ = c.write(Frame{Final: true, Opcode: CloseMessage, Payload: FormatClose(echo, "")})
+	_ = c.conn.Close()
+
+	c.readErr = &CloseError{Code: code, Reason: reason}
+
+	return c.readErr
+}
+
+// failRead ends the connection the way section 7.1.7 requires: a close frame
+// carrying the code that says what was wrong, then the socket shut.
+//
+// Telling the peer WHY is not politeness. A client whose frames are refused with
+// no explanation retries the same frames; one that is told 1007 knows its
+// encoder is broken, and one that is told 1009 knows to fragment. This is also
+// exactly what the Autobahn suite measures -- most of its failures are servers
+// that close with the right timing and the wrong code.
+func (c *Conn) failRead(err error) error {
+	code := CloseProtocolError
+	switch {
+	case errors.Is(err, ErrBadUTF8):
+		code = CloseInvalidFramePayloadData
+	case errors.Is(err, ErrTooLarge):
+		code = CloseMessageTooBig
+	case isTransport(err):
+		// Nothing to say and nobody to say it to: the read failed on a deadline,
+		// a reset or an EOF, so the connection is already gone.
+		c.readErr = err
+		_ = c.conn.Close()
+
 		return err
 	}
-	if c.isWriting {
-		panic("concurrent write to websocket connection")
-	}
-	c.isWriting = true
-	err = c.write(frameType, c.writeDeadline, frameData, nil)
-	if !c.isWriting {
-		panic("concurrent write to websocket connection")
-	}
-	c.isWriting = false
+
+	_ = c.write(Frame{Final: true, Opcode: CloseMessage, Payload: FormatClose(code, "")})
+	_ = c.conn.Close()
+	c.readErr = err
+
 	return err
 }
 
-// WriteMessage is a helper method for getting a writer using NextWriter,
-// writing the message and closing the writer.
+// isTransport reports whether the error came from the network rather than from
+// the protocol, which decides whether a close frame is worth attempting.
+func isTransport(err error) bool {
+	switch {
+	case errors.Is(err, ErrReservedBits), errors.Is(err, ErrUnmaskedClient),
+		errors.Is(err, ErrMaskedServer), errors.Is(err, ErrBadOpcode),
+		errors.Is(err, ErrBadCloseCode), errors.Is(err, ErrBadUTF8),
+		errors.Is(err, ErrTooLarge), errors.Is(err, ErrBadFragment),
+		errors.Is(err, ErrControlTooLong):
+		return false
+	}
+
+	return true
+}
+
+// WriteMessage writes one message as a single frame.
+//
+// One frame and not several: fragmentation exists for a sender that does not
+// know the length in advance, and here the message is a byte slice whose length
+// is known. A control opcode is accepted too, which is how a close is sent.
+//
+// Safe to call from several goroutines. Each call holds the connection's write
+// mutex for its whole frame, because a frame split by another writer is a frame
+// the peer must fail the connection over.
 func (c *Conn) WriteMessage(messageType int, data []byte) error {
-
-	if c.isServer && (c.newCompressionWriter == nil || !c.enableWriteCompression) {
-		// Fast path with no allocations and single frame.
-
-		var mw messageWriter
-		if err := c.beginMessage(&mw, messageType); err != nil {
-			return err
-		}
-		n := copy(c.writeBuf[mw.pos:], data)
-		mw.pos += n
-		data = data[n:]
-		return mw.flushFrame(true, data)
-	}
-
-	w, err := c.NextWriter(messageType)
-	if err != nil {
-		return err
-	}
-	if _, err = w.Write(data); err != nil {
-		return err
-	}
-	return w.Close()
-}
-
-// SetWriteDeadline sets the write deadline on the underlying network
-// connection. After a write has timed out, the websocket state is corrupt and
-// all future writes will return an error. A zero value for t means writes will
-// not time out.
-func (c *Conn) SetWriteDeadline(t time.Time) error {
-	c.writeDeadline = t
-	return nil
-}
-
-// Read methods
-
-func (c *Conn) advanceFrame() (int, error) {
-	// 1. Skip remainder of previous frame.
-
-	if c.readRemaining > 0 {
-		if _, err := io.CopyN(io.Discard, c.br, c.readRemaining); err != nil {
-			return noFrame, err
-		}
-	}
-
-	// 2. Read and parse first two bytes of frame header.
-	// To aid debugging, collect and report all errors in the first two bytes
-	// of the header.
-
-	var errors []string
-
-	p, err := c.read(2)
-	if err != nil {
-		return noFrame, err
-	}
-
-	frameType := int(p[0] & 0xf)
-	final := p[0]&finalBit != 0
-	rsv1 := p[0]&rsv1Bit != 0
-	rsv2 := p[0]&rsv2Bit != 0
-	rsv3 := p[0]&rsv3Bit != 0
-	mask := p[1]&maskBit != 0
-	_ = c.setReadRemaining(int64(p[1] & 0x7f)) // will not fail because argument is >= 0
-
-	c.readDecompress = false
-	if rsv1 {
-		if c.newDecompressionReader != nil {
-			c.readDecompress = true
-		} else {
-			errors = append(errors, "RSV1 set")
-		}
-	}
-
-	if rsv2 {
-		errors = append(errors, "RSV2 set")
-	}
-
-	if rsv3 {
-		errors = append(errors, "RSV3 set")
-	}
-
-	switch frameType {
-	case CloseMessage, PingMessage, PongMessage:
-		if c.readRemaining > maxControlFramePayloadSize {
-			errors = append(errors, "len > 125 for control")
-		}
-		if !final {
-			errors = append(errors, "FIN not set on control")
-		}
-	case TextMessage, BinaryMessage:
-		if !c.readFinal {
-			errors = append(errors, "data before FIN")
-		}
-		c.readFinal = final
-	case continuationFrame:
-		if c.readFinal {
-			errors = append(errors, "continuation after FIN")
-		}
-		c.readFinal = final
+	switch messageType {
+	case TextMessage, BinaryMessage, CloseMessage, PingMessage, PongMessage:
 	default:
-		errors = append(errors, "bad opcode "+strconv.Itoa(frameType))
+		return fmt.Errorf("%w: %d may not be written as a message", ErrBadOpcode, messageType)
 	}
 
-	if mask != c.isServer {
-		errors = append(errors, "bad MASK")
-	}
-
-	if len(errors) > 0 {
-		return noFrame, c.handleProtocolError(strings.Join(errors, ", "))
-	}
-
-	// 3. Read and parse frame length as per
-	// https://tools.ietf.org/html/rfc6455#section-5.2
-	//
-	// The length of the "Payload data", in bytes: if 0-125, that is the payload
-	// length.
-	// - If 126, the following 2 bytes interpreted as a 16-bit unsigned
-	// integer are the payload length.
-	// - If 127, the following 8 bytes interpreted as
-	// a 64-bit unsigned integer (the most significant bit MUST be 0) are the
-	// payload length. Multibyte length quantities are expressed in network byte
-	// order.
-
-	switch c.readRemaining {
-	case 126:
-		p, err := c.read(2)
-		if err != nil {
-			return noFrame, err
-		}
-
-		if err := c.setReadRemaining(int64(binary.BigEndian.Uint16(p))); err != nil {
-			return noFrame, err
-		}
-	case 127:
-		p, err := c.read(8)
-		if err != nil {
-			return noFrame, err
-		}
-
-		if err := c.setReadRemaining(int64(binary.BigEndian.Uint64(p))); err != nil {
-			return noFrame, err
-		}
-	}
-
-	// 4. Handle frame masking.
-
-	if mask {
-		c.readMaskPos = 0
-		p, err := c.read(len(c.readMaskKey))
-		if err != nil {
-			return noFrame, err
-		}
-		copy(c.readMaskKey[:], p)
-	}
-
-	// 5. For text and binary messages, enforce read limit and return.
-
-	if frameType == continuationFrame || frameType == TextMessage || frameType == BinaryMessage {
-
-		c.readLength += c.readRemaining
-		// Don't allow readLength to overflow in the presence of a large readRemaining
-		// counter.
-		if c.readLength < 0 {
-			return noFrame, ErrReadLimit
-		}
-
-		if c.readLimit > 0 && c.readLength > c.readLimit {
-			// Make a best effort to send a close message describing the problem.
-			_ = c.WriteControl(CloseMessage, FormatCloseMessage(CloseMessageTooBig, ""), time.Now().Add(writeWait))
-			return noFrame, ErrReadLimit
-		}
-
-		return frameType, nil
-	}
-
-	// 6. Read control frame payload.
-
-	var payload []byte
-	if c.readRemaining > 0 {
-		payload, err = c.read(int(c.readRemaining))
-		_ = c.setReadRemaining(0) // will not fail because argument is >= 0
-		if err != nil {
-			return noFrame, err
-		}
-		if c.isServer {
-			maskBytes(c.readMaskKey, 0, payload)
-		}
-	}
-
-	// 7. Process control frame payload.
-
-	switch frameType {
-	case PongMessage:
-		if err := c.handlePong(string(payload)); err != nil {
-			return noFrame, err
-		}
-	case PingMessage:
-		if err := c.handlePing(string(payload)); err != nil {
-			return noFrame, err
-		}
-	case CloseMessage:
-		closeCode := CloseNoStatusReceived
-		closeText := ""
-		if len(payload) >= 2 {
-			closeCode = int(binary.BigEndian.Uint16(payload))
-			if !isValidReceivedCloseCode(closeCode) {
-				return noFrame, c.handleProtocolError("bad close code " + strconv.Itoa(closeCode))
-			}
-			closeText = string(payload[2:])
-			if !utf8.ValidString(closeText) {
-				return noFrame, c.handleProtocolError("invalid utf8 payload in close frame")
-			}
-		}
-		if err := c.handleClose(closeCode, closeText); err != nil {
-			return noFrame, err
-		}
-		return noFrame, &CloseError{Code: closeCode, Text: closeText}
-	}
-
-	return frameType, nil
+	return c.write(Frame{Final: true, Opcode: messageType, Payload: data})
 }
 
-func (c *Conn) handleProtocolError(message string) error {
-	return c.handleCloseWithCode(CloseProtocolError, message)
-}
+// write is the one path to the socket, and everything goes through it.
+func (c *Conn) write(frame Frame) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 
-// handleCloseWithCode tells the peer why the connection is being failed and
-// returns the error for the application.
-//
-// The code carries the reason section 7.4.1 has for it: 1002 for a frame that
-// broke the framing rules, 1007 for a text payload that was not UTF-8. A client
-// whose frames are refused with no code retries the same frames; one that is
-// told 1007 knows its encoder is broken.
-//
-// FormatCloseMessage fits the reason to the control frame, so there is no
-// second cut here.
-func (c *Conn) handleCloseWithCode(closeCode int, message string) error {
-	// Make a best effor to send a close message describing the problem.
-	_ = c.WriteControl(CloseMessage, FormatCloseMessage(closeCode, message), time.Now().Add(writeWait))
-	return errors.New("websocket: " + message)
-}
-
-// NextReader returns the next data message received from the peer. The
-// returned messageType is either TextMessage or BinaryMessage.
-//
-// There can be at most one open reader on a connection. NextReader discards
-// the previous message if the application has not already consumed it.
-//
-// Applications must break out of the application's read loop when this method
-// returns a non-nil error value. Errors returned from this method are
-// permanent. Once this method returns a non-nil error, all subsequent calls to
-// this method return the same error.
-func (c *Conn) NextReader() (messageType int, r io.Reader, err error) {
-	// Close previous reader, only relevant for decompression.
-	if c.reader != nil {
-		c.reader.Close()
-		c.reader = nil
+	if c.closeSent {
+		return ErrCloseSent
+	}
+	if frame.Opcode == CloseMessage {
+		c.closeSent = true
 	}
 
-	c.messageReader = nil
-	c.readLength = 0
-
-	for c.readErr == nil {
-		frameType, err := c.advanceFrame()
-		if err != nil {
-			c.readErr = err
-			break
-		}
-
-		if frameType == TextMessage || frameType == BinaryMessage {
-			c.messageReader = &messageReader{c}
-			c.reader = c.messageReader
-			if c.readDecompress {
-				c.reader = c.newDecompressionReader(c.reader)
-			}
-			if frameType == TextMessage {
-				// Outermost, so that what is checked is the text the
-				// application is about to read. Wrapping the frame reader
-				// instead would check the compressed bytes, which are not text
-				// and are not what section 5.6 is about.
-				c.reader = &textReader{c: c, r: c.reader}
-			}
-			return frameType, c.reader, nil
-		}
+	if err := WriteFrame(c.bw, frame, c.isClient); err != nil {
+		return err
 	}
 
-	// Applications that do handle the error returned from this method spin in
-	// tight loop on connection failure. To help application developers detect
-	// this error, panic on repeated reads to the failed connection.
-	c.readErrCount++
-	if c.readErrCount >= 1000 {
-		panic("repeated read on failed websocket connection")
-	}
-
-	return noFrame, nil, c.readErr
-}
-
-// textReader fails the connection when a text message is not valid UTF-8.
-//
-// Section 5.6 says a text message is UTF-8 and section 8.1 says the connection
-// is failed with 1007 when it is not. The check runs while the application
-// reads, so a bad byte ends the connection at the byte rather than after a
-// message that may be enormous.
-type textReader struct {
-	c *Conn
-	r io.ReadCloser
-	v utf8Validator
-}
-
-func (t *textReader) Read(b []byte) (int, error) {
-	n, err := t.r.Read(b)
-	if n > 0 && !t.v.write(b[:n]) {
-		return 0, t.fail()
-	}
-	if err == io.EOF && !t.v.complete() {
-		// Every byte was legal on its own and the message still ends halfway
-		// through a rune.
-		return 0, t.fail()
-	}
-	return n, err
-}
-
-func (t *textReader) Close() error { return t.r.Close() }
-
-// fail records the error so that every later read reports it, and tells the peer
-// which of its bytes was refused.
-func (t *textReader) fail() error {
-	err := t.c.handleCloseWithCode(CloseInvalidFramePayloadData, "invalid utf8 payload in text frame")
-	t.c.readErr = err
-	return err
-}
-
-type messageReader struct{ c *Conn }
-
-func (r *messageReader) Read(b []byte) (int, error) {
-	c := r.c
-	if c.messageReader != r {
-		return 0, io.EOF
-	}
-
-	for c.readErr == nil {
-
-		if c.readRemaining > 0 {
-			if int64(len(b)) > c.readRemaining {
-				b = b[:c.readRemaining]
-			}
-			n, err := c.br.Read(b)
-			c.readErr = err
-			if c.isServer {
-				c.readMaskPos = maskBytes(c.readMaskKey, c.readMaskPos, b[:n])
-			}
-			rem := c.readRemaining
-			rem -= int64(n)
-			_ = c.setReadRemaining(rem) // rem is guaranteed to be >= 0
-			if c.readRemaining > 0 && c.readErr == io.EOF {
-				c.readErr = errUnexpectedEOF
-			}
-			return n, c.readErr
-		}
-
-		if c.readFinal {
-			c.messageReader = nil
-			return 0, io.EOF
-		}
-
-		frameType, err := c.advanceFrame()
-		switch {
-		case err != nil:
-			c.readErr = err
-		case frameType == TextMessage || frameType == BinaryMessage:
-			c.readErr = errors.New("websocket: internal error, unexpected text or binary in Reader")
-		}
-	}
-
-	err := c.readErr
-	if err == io.EOF && c.messageReader == r {
-		err = errUnexpectedEOF
-	}
-	return 0, err
-}
-
-func (r *messageReader) Close() error {
-	return nil
-}
-
-// ReadMessage is a helper method for getting a reader using NextReader and
-// reading from that reader to a buffer.
-func (c *Conn) ReadMessage() (messageType int, p []byte, err error) {
-	var r io.Reader
-	messageType, r, err = c.NextReader()
-	if err != nil {
-		return messageType, nil, err
-	}
-	p, err = io.ReadAll(r)
-	return messageType, p, err
-}
-
-// SetReadDeadline sets the read deadline on the underlying network connection.
-// After a read has timed out, the websocket connection state is corrupt and
-// all future reads will return an error. A zero value for t means reads will
-// not time out.
-func (c *Conn) SetReadDeadline(t time.Time) error {
-	return c.conn.SetReadDeadline(t)
-}
-
-// SetReadLimit sets the maximum size in bytes for a message read from the peer. If a
-// message exceeds the limit, the connection sends a close message to the peer
-// and returns ErrReadLimit to the application.
-func (c *Conn) SetReadLimit(limit int64) {
-	c.readLimit = limit
-}
-
-// CloseHandler returns the current close handler
-func (c *Conn) CloseHandler() func(code int, text string) error {
-	return c.handleClose
-}
-
-// SetCloseHandler sets the handler for close messages received from the peer.
-// The code argument to h is the received close code or CloseNoStatusReceived
-// if the close message is empty. The default close handler sends a close
-// message back to the peer.
-//
-// The handler function is called from the NextReader, ReadMessage and message
-// reader Read methods. The application must read the connection to process
-// close messages as described in the section on Control Messages above.
-//
-// The connection read methods return a CloseError when a close message is
-// received. Most applications should handle close messages as part of their
-// normal error handling. Applications should only set a close handler when the
-// application must perform some action before sending a close message back to
-// the peer.
-func (c *Conn) SetCloseHandler(h func(code int, text string) error) {
-	if h == nil {
-		h = func(code int, text string) error {
-			message := FormatCloseMessage(code, "")
-			// Make a best effor to send the close message.
-			_ = c.WriteControl(CloseMessage, message, time.Now().Add(writeWait))
-			return nil
-		}
-	}
-	c.handleClose = h
-}
-
-// PingHandler returns the current ping handler
-func (c *Conn) PingHandler() func(appData string) error {
-	return c.handlePing
-}
-
-// SetPingHandler sets the handler for ping messages received from the peer.
-// The appData argument to h is the PING message application data. The default
-// ping handler sends a pong to the peer.
-//
-// The handler function is called from the NextReader, ReadMessage and message
-// reader Read methods. The application must read the connection to process
-// ping messages as described in the section on Control Messages above.
-func (c *Conn) SetPingHandler(h func(appData string) error) {
-	if h == nil {
-		h = func(message string) error {
-			// Make a best effort to send the pong message.
-			_ = c.WriteControl(PongMessage, []byte(message), time.Now().Add(writeWait))
-			return nil
-		}
-	}
-	c.handlePing = h
-}
-
-// PongHandler returns the current pong handler
-func (c *Conn) PongHandler() func(appData string) error {
-	return c.handlePong
-}
-
-// SetPongHandler sets the handler for pong messages received from the peer.
-// The appData argument to h is the PONG message application data. The default
-// pong handler does nothing.
-//
-// The handler function is called from the NextReader, ReadMessage and message
-// reader Read methods. The application must read the connection to process
-// pong messages as described in the section on Control Messages above.
-func (c *Conn) SetPongHandler(h func(appData string) error) {
-	if h == nil {
-		h = func(string) error { return nil }
-	}
-	c.handlePong = h
-}
-
-// NetConn returns the underlying connection that is wrapped by c.
-// Note that writing to or reading from this connection directly will corrupt the
-// WebSocket connection.
-func (c *Conn) NetConn() net.Conn {
-	return c.conn
-}
-
-// UnderlyingConn returns the internal net.Conn. This can be used to further
-// modifications to connection specific flags.
-// Deprecated: Use the NetConn method.
-func (c *Conn) UnderlyingConn() net.Conn {
-	return c.conn
-}
-
-// EnableWriteCompression enables and disables write compression of
-// subsequent text and binary messages. This function is a noop if
-// compression was not negotiated with the peer.
-func (c *Conn) EnableWriteCompression(enable bool) {
-	c.enableWriteCompression = enable
-}
-
-// SetCompressionLevel sets the flate compression level for subsequent text and
-// binary messages. This function is a noop if compression was not negotiated
-// with the peer. See the compress/flate package for a description of
-// compression levels.
-func (c *Conn) SetCompressionLevel(level int) error {
-	if !isValidCompressionLevel(level) {
-		return errors.New("websocket: invalid compression level")
-	}
-	c.compressionLevel = level
-	return nil
-}
-
-// FormatCloseMessage formats closeCode and text as a WebSocket close message.
-// An empty message is returned for code CloseNoStatusReceived.
-//
-// A close frame is a control frame, so the result never exceeds 125 bytes. The
-// text is shortened to fit rather than refused: a close that WriteControl turns
-// away because its explanation was too long leaves the peer with no explanation
-// at all, which is worse than a short one.
-//
-// The cut lands on a rune boundary. A close reason is held to the same UTF-8
-// rule as a text message, so a cut inside a multi-byte rune turns an
-// explanation into a frame the peer must fail the connection over. The text
-// loses up to three further bytes; nothing else changes.
-func FormatCloseMessage(closeCode int, text string) []byte {
-	if closeCode == CloseNoStatusReceived {
-		// Return empty message because it's illegal to send
-		// CloseNoStatusReceived. Return non-nil value in case application
-		// checks for nil.
-		return []byte{}
-	}
-	text = truncateToRune(text, maxControlFramePayloadSize-2)
-	buf := make([]byte, 2+len(text))
-	binary.BigEndian.PutUint16(buf, uint16(closeCode))
-	copy(buf[2:], text)
-	return buf
-}
-
-// truncateToRune shortens s to at most n bytes without splitting a rune.
-//
-// It is the one place that shortens a close reason. A second implementation of
-// the same cut is how one of them ends up splitting a rune the other does not.
-func truncateToRune(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	s = s[:n]
-	for len(s) > 0 {
-		// A RuneError one byte wide is the cut showing: the rune the text ends
-		// in is no longer there. One that is three bytes wide was in the text to
-		// begin with, and stays.
-		if r, size := utf8.DecodeLastRuneInString(s); r != utf8.RuneError || size > 1 {
-			break
-		}
-		s = s[:len(s)-1]
-	}
-	return s
+	return c.bw.Flush()
 }

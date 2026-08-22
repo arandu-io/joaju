@@ -29,14 +29,19 @@ container image runs.
 ## What it delivers
 
 **Nothing in the dependency graph that is not ours or the standard library's.**
-The root `go.mod` requires `github.com/arandu-io/hesape` and
-`golang.org/x/net`, and a CI step fails the build on anything outside
-`arandu-io` and `golang.org/x`. Subpackage `ws` is the RFC 6455 transport, in
-the tree rather than in the graph, and `golang.org/x/net` is what its client
-dials a SOCKS5 proxy with. It is measured and not asserted: Autobahn TestSuite
-version 18, every case except `12.*` and `13.*` — permessage-deflate, which the
-server does not negotiate — **301 cases, 0 failures**. The report is
-[`tests/Specification/REPORT.txt`](tests/Specification/REPORT.txt).
+The root `go.mod` requires one module, `github.com/arandu-io/hesape`, and a CI
+step fails the build on anything outside `arandu-io` and `golang.org/x`.
+Subpackage `ws` is the RFC 6455 transport, in the tree rather than in the graph:
+the surface the server uses is nineteen names, and taking a library for them
+would bring a client stack, a buffer pool and permessage-deflate along with it.
+
+The conformance number is not quoted here today, and the reason is worth stating
+rather than hiding. The transport was replaced, and the report on disk —
+[`tests/Specification/REPORT.txt`](tests/Specification/REPORT.txt) — was produced
+against the one it replaced. A figure that describes code no longer in the tree
+is worse than no figure. `tests/Specification/run.sh` regenerates it: Autobahn
+TestSuite 18, every case except `12.*` and `13.*`, which is permessage-deflate
+the server does not negotiate.
 
 **No path to a channel that a policy did not open.** The server authenticates
 nobody: it reads the subject the framework's middleware put on the request and

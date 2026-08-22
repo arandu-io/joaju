@@ -1,31 +1,34 @@
-// Copyright 2013 The HYZIS WebSocket Authors. All rights reserved.
-// Use of this source code is governed by a BSD-style
-// license that can be found in the LICENSE file.
-
 package ws
 
 import "unicode/utf8"
 
+// ValidUTF8 reports whether b is well-formed UTF-8.
+//
+// It is the whole-payload check, for a close reason and for a text message that
+// arrived in one frame. A message split across frames uses [utf8Validator]
+// instead, because the split may fall in the middle of a rune.
+func ValidUTF8(b []byte) bool { return utf8.Valid(b) }
+
 // utf8Validator checks UTF-8 across frame boundaries.
 //
 // RFC 6455 section 5.6 requires a text message to be valid UTF-8, and section
-// 8.1 requires the connection to be failed as soon as that is known -- not after
-// the last fragment. A four-byte rune may be split over two frames, so the check
-// has to carry state: the bytes still owed, the value assembled so far, and the
-// length the rune claimed.
+// 8.1 requires the server to fail the connection with 1007 as soon as it knows
+// -- not after the last fragment. A four-byte rune may be split over two
+// frames, so the check has to carry state: bytes seen, bytes still owed, and
+// what the value so far means for the range checks.
 //
-// The reason it cannot buffer the message and call utf8.Valid at the end: a peer
-// may send a hundred megabytes of text in 125-byte fragments, and the point of
-// the incremental check is to refuse it on the first bad byte instead of after
-// the last good one.
+// The reason it cannot just buffer and call [ValidUTF8] at the end: a client may
+// send a 100 MB text message in 125-byte fragments, and the whole point of the
+// incremental check is to refuse it on the first bad byte instead of after the
+// last good one.
 type utf8Validator struct {
 	// pending is how many continuation bytes are still owed.
 	pending int
 	// value is the code point assembled so far, used for the overlong and
 	// surrogate checks that only the full value can decide.
 	value rune
-	// need is the total length the rune in progress claimed, kept because the
-	// smallest legal value depends on it.
+	// need is the total length of the rune in progress, kept because the
+	// minimum legal value depends on it.
 	need int
 	// bad latches: once invalid, always invalid.
 	bad bool
@@ -34,12 +37,12 @@ type utf8Validator struct {
 // reset starts a new message.
 func (v *utf8Validator) reset() { *v = utf8Validator{} }
 
-// write feeds the next bytes and reports whether everything so far is still
-// valid UTF-8.
+// write feeds the next bytes of the message and reports whether everything so
+// far is still valid UTF-8.
 //
-// This is a decoder written out rather than a call to utf8.DecodeRune in a loop,
-// and the state is why: DecodeRune needs the whole rune in one slice, and here
-// the rune may be one byte in this frame and three in the next.
+// This is a decoder written by hand rather than a call to utf8.DecodeRune in a
+// loop, and the reason is the state: DecodeRune needs the whole rune in one
+// slice, and here the rune may be one byte in this frame and three in the next.
 func (v *utf8Validator) write(b []byte) bool {
 	if v.bad {
 		return false
@@ -75,13 +78,13 @@ func (v *utf8Validator) write(b []byte) bool {
 			continue
 		}
 
-		// The rune is complete, and three things can still be wrong with it: it
-		// can be encoded in more bytes than it needs, which is an overlong form
-		// and is how a slash gets past a naive filter; it can be a surrogate
-		// half, which UTF-8 does not encode; or it can be above the Unicode
+		// The rune is complete, and three things can still be wrong with it:
+		// it can be encoded in more bytes than it needs (an overlong form,
+		// which is how a slash gets past a naive filter), it can be a surrogate
+		// half, which UTF-8 does not encode, or it can be above the Unicode
 		// maximum.
 		switch {
-		case v.value < minValueForLength[v.need]:
+		case v.value < minForLength[v.need]:
 			v.bad = true
 		case v.value >= 0xd800 && v.value <= 0xdfff:
 			v.bad = true
@@ -96,12 +99,12 @@ func (v *utf8Validator) write(b []byte) bool {
 	return true
 }
 
-// complete reports whether what has been written ends on a rune boundary.
+// complete reports whether the message ended on a rune boundary.
 //
 // A text message whose last frame stops halfway through a rune is invalid, and
 // this is the only place that can tell -- every byte in it was legal on its own.
 func (v *utf8Validator) complete() bool { return !v.bad && v.pending == 0 }
 
-// minValueForLength is the smallest code point each encoded length may carry,
-// which is what makes an overlong form detectable.
-var minValueForLength = [5]rune{0, 0, 0x80, 0x800, 0x10000}
+// minForLength is the smallest code point each encoded length may carry, which
+// is what makes an overlong form detectable.
+var minForLength = [5]rune{0, 0, 0x80, 0x800, 0x10000}

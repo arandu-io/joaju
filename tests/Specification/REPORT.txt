@@ -1,10 +1,15 @@
+STALE — this report does not describe the transport in the tree.
+
+It was produced on 2026-08-21 against the previous ws package, which was
+replaced on 2026-08-22. Every number below is about code that is no longer
+here. Regenerate with tests/Specification/run.sh before quoting any of it.
+
 Autobahn TestSuite against the ws package of github.com/arandu-io/joaju
 run at:     2026-08-21 00:50:28 UTC
 target:     ws://host.docker.internal:9001
 image:      crossbario/autobahn-testsuite:latest (linux/amd64)
 suite:      Autobahn 18, all cases except 12.* and 13.* (permessage-deflate,
-            not negotiated by this harness -- the same pair laravel/reverb
-            excludes)
+            not negotiated by this harness)
 pass rule:  OK or NON-STRICT, and a closing handshake of OK or INFORMATIONAL
 
 agent: joaju/ws
