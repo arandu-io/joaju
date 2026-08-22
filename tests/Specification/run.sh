@@ -20,10 +20,9 @@
 #
 # Autobahn 18 -- draft 18 is RFC 6455 -- minus groups 12 and 13, which are
 # permessage-deflate. The transport implements that extension and the echo
-# server does not negotiate it, so those groups measure nothing here. It is the
-# same pair laravel/reverb excludes, so the score is comparable to the score
-# there; turning EnableCompression on in the echo server is what would bring the
-# two groups into the run.
+# server does not negotiate it, so those groups measure nothing here. Turning
+# EnableCompression on in the echo server is what would bring the two groups
+# into the run.
 #
 # # Two settings that are not tuning
 #
@@ -149,8 +148,7 @@ run at:     $(date -u '+%Y-%m-%d %H:%M:%S UTC')
 target:     ws://${target}
 image:      ${image} (${platform})
 suite:      Autobahn 18, all cases except 12.* and 13.* (permessage-deflate,
-            not negotiated by this harness -- the same pair laravel/reverb
-            excludes)
+            not negotiated by this harness)
 pass rule:  OK or NON-STRICT, and a closing handshake of OK or INFORMATIONAL
 
 "

@@ -1,14 +1,15 @@
 // The Joaju browser client: the Pusher protocol, spoken from a page.
 //
 // A protocol only exists if something on the other end speaks it, and nothing in
-// a browser speaks this one. In Laravel that half is laravel-echo over pusher-js,
-// and both arrive through npm -- which this project does not have, anywhere
-// (RULE 13). So this file is written here and served by the binary, the way HTMX
-// and Alpine already are (ADR 0052).
+// a browser speaks this one. The ready-made browser halves of it arrive through
+// npm -- which this project does not have, anywhere (RULE 13). So this file is
+// written here and served by the binary, the way HTMX and Alpine already are
+// (ADR 0052).
 //
-// What is deliberately NOT here is laravel-echo. It resolves a channel against
-// Laravel's container, and there is no container (ADR 0001); what it would add on
-// top of this file is a second vocabulary for the same subscribe call.
+// What is deliberately NOT here is the wrapper layer that usually sits on top of
+// a client like this one. It resolves a channel name through a service container
+// before subscribing, and this project has no container (ADR 0001); what it would
+// add on top of this file is a second vocabulary for the same subscribe call.
 //
 // # It runs as it is written
 //
@@ -38,8 +39,8 @@
 //
 // Everything a page needs is on those two objects: a connection, and a channel
 // per name. The state names -- connecting, connected, unavailable, failed,
-// disconnected -- are pusher-js's, so that a developer arriving from Laravel
-// reads them without being taught (RULE 10).
+// disconnected -- are pusher-js's, so that a developer who has spoken this
+// protocol before reads them without being taught (RULE 10).
 
 'use strict';
 
@@ -95,8 +96,8 @@
     // what a page that says nothing gets.
     var DEFAULTS = {
         // authEndpoint is where a private or presence subscription is authorized.
-        // It is Pusher's own path, and Laravel's, so an application that already
-        // has one does not move it.
+        // It is Pusher's own path, so an application that already has one does
+        // not move it.
         authEndpoint: '/broadcasting/auth',
         // authHeaders is what goes on the authorization request on top of the
         // content type -- a CSRF token, usually.
@@ -815,10 +816,10 @@
 
     // _authorize asks the application whether this socket may have this channel.
     //
-    // It is Pusher's shape and Laravel's route: a form-encoded POST carrying
-    // socket_id and channel_name, answered with { auth } and, for a presence
-    // channel, { channel_data }. Form-encoded rather than JSON because that is
-    // what the endpoint on the other end already reads.
+    // It is Pusher's shape: a form-encoded POST carrying socket_id and
+    // channel_name, answered with { auth } and, for a presence channel,
+    // { channel_data }. Form-encoded rather than JSON because that is what the
+    // endpoint on the other end already reads.
     //
     // The credentials go because that is the whole mechanism: the endpoint is the
     // application's own, behind its own session, and what it answers is a decision
