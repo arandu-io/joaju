@@ -308,9 +308,9 @@
     // _succeeded records the confirmation, and on a presence channel the member
     // list that came with it.
     //
-    // The list arrives as Reverb's presence block -- { presence: { count, ids,
-    // hash } } -- and hash is user_id -> user_info, which is the whole of what a
-    // member is here.
+    // The list arrives as the protocol's presence block -- { presence: { count,
+    // ids, hash } } -- and hash is user_id -> user_info, which is the whole of
+    // what a member is here.
     Channel.prototype._succeeded = function (data) {
         this.subscribed = true;
         this.members.clear();
