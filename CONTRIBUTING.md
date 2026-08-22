@@ -36,11 +36,13 @@ compiled at all, and a suite nothing built is a suite nothing checked. They pull
 in a RESP server for `redis/tests/Integration` and a JavaScript runtime for
 `tests/E2E`; both skip and say so when there is none.
 
-CI runs exactly this, plus a check that no new dependency entered the graph:
-this repository depends on the standard library and `github.com/arandu-io/hesape`,
-and nothing else. That is not an accident of the current feature set — the `ws`
-subpackage exists so the transport costs nothing in the dependency graph. A pull
-request that adds a dependency needs to argue for it first, in an issue.
+CI runs these, and a handful of checks besides; `.github/workflows/ci.yml` is
+the list, and it is what decides. The one worth knowing before you write the
+change guards the graph: nothing enters it but this project's own modules and
+`golang.org/x`, the standard library's annex. That is not an accident of the
+current feature set — the `ws` subpackage exists so the transport costs nothing
+in the dependency graph. A pull request that adds a dependency needs to argue
+for it first, in an issue.
 
 ## Where a test goes
 
