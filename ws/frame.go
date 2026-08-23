@@ -5,7 +5,7 @@
 //
 // # What it is, and what it deliberately is not
 //
-// It is a server. There is a [Dial] for tests and for one instance talking to
+// It is a server. There is a [Dialer.Dial] for tests and for one instance talking to
 // another, and there is nothing else on the client side: no proxy support, no
 // redirect following, no cookie jar. A library carries those because it does not
 // know who is calling; this one does.

@@ -66,7 +66,7 @@ rather than failing a request. The bus is RESP pub/sub, in the `redis/`
 submodule — its own `go.mod`, because the driver under it is third-party and Go
 has no optional dependency.
 
-11,318 lines of production code and 14,885 of test.
+9,931 lines of production code and 11,486 of test.
 
 ## Install
 

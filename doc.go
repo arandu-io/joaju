@@ -120,7 +120,8 @@
 //
 // Subpackage ws is this project's own implementation of RFC 6455, and it is why
 // the dependency graph has one entry in it. It is not a fork and it borrows no
-// code: the surface this server actually uses is ten symbols, so writing them
+// code: the surface this server actually uses is nineteen names -- twelve of
+// the package and seven methods of Conn -- so writing them
 // costs less than carrying a library's client stack, proxy support and
 // compression -- and less than tracking somebody else's security advisories
 // forever.
