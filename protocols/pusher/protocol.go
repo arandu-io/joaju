@@ -176,6 +176,7 @@ func NewPusher(broker joaju.Broker, subscribe joaju.SubscriptionPolicy, cfg Push
 		maxChannels: cfg.MaxChannelsPerConnection,
 		observer:    cfg.Observer,
 		seats:       make(map[joaju.SocketID]map[string]seat),
+		joining:     make(map[string]int),
 	}
 	if p.maxChannels == 0 {
 		p.maxChannels = DefaultMaxChannelsPerConnection
@@ -248,6 +249,14 @@ type pusher struct {
 	// socket that closes, and what it recovers is a map this type can keep as
 	// it goes.
 	seats map[joaju.SocketID]map[string]seat
+	// joining reserves a channel between the Broker handing it out and the
+	// Channel recording the subscriber. Without the reservation, the previous
+	// last subscriber can remove the channel in that gap and leave the new
+	// socket seated on an object the Broker no longer returns.
+	//
+	// Keyed by ChannelName.String so two tenants asking for the same client-side
+	// name never reserve one another's channels.
+	joining map[string]int
 }
 
 var _ joaju.Protocol = (*pusher)(nil)
@@ -430,6 +439,7 @@ func (p *pusher) join(ctx context.Context, conn *joaju.Connection, f Frame) erro
 
 	held := seat{name: name, channel: channel, grant: grant}
 	if err := channel.Subscribe(ctx, grant, conn, member); err != nil {
+		p.finishJoining(name)
 		// A subscription that failed leaves nothing behind. The seat is not
 		// recorded, and the channel this call may have just created is dropped if
 		// it is still empty -- otherwise a client subscribing to a presence
@@ -607,6 +617,7 @@ func (p *pusher) reach(ctx context.Context, g auth.Grant, name joaju.ChannelName
 	if err != nil {
 		return nil, false, err
 	}
+	p.joining[name.String()]++
 
 	return channel, missing, nil
 }
@@ -650,6 +661,12 @@ func (p *pusher) drop(ctx context.Context, s seat) (bool, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
+	// A subscriber between FindOrCreate and Subscribe is not in Connections
+	// yet, but the channel has already been handed to it. Removing the channel
+	// here would let that subscription succeed on an orphaned object.
+	if p.joining[s.name.String()] > 0 {
+		return false, nil
+	}
 	if len(s.channel.Connections()) > 0 {
 		return false, nil
 	}
@@ -701,12 +718,36 @@ func (p *pusher) take(id joaju.SocketID, s seat) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
+	p.finishJoiningLocked(s.name)
 	held := p.seats[id]
 	if held == nil {
 		held = make(map[string]seat)
 		p.seats[id] = held
 	}
 	held[s.name.String()] = s
+}
+
+// finishJoining releases the channel reservation made by [pusher.reach].
+//
+// A failed Channel.Subscribe calls this before it unwinds through
+// [pusher.unseat]. A successful one releases it in [pusher.take], in the same
+// critical section that records the seat, so there is no second gap between
+// the reservation and the durable record.
+func (p *pusher) finishJoining(name joaju.ChannelName) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	p.finishJoiningLocked(name)
+}
+
+// finishJoiningLocked is finishJoining for a caller already holding p.mu.
+func (p *pusher) finishJoiningLocked(name joaju.ChannelName) {
+	key := name.String()
+	if p.joining[key] <= 1 {
+		delete(p.joining, key)
+		return
+	}
+	p.joining[key]--
 }
 
 // seatOf is this socket's membership of one channel, if it has one.
