@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"log/slog"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -165,9 +166,10 @@ func loadConfig(env environment) (config, error) {
 		return config{}, fmt.Errorf("joaju: %sTENANT is %q, which cannot be a tenant: it is limited to letters, digits, - and _, up to 64 characters", envPrefix, cfg.Tenant)
 	}
 
-	cfg.AllowedOrigins = env.list("ALLOWED_ORIGINS")
-
 	var err error
+	if cfg.AllowedOrigins, err = env.origins("ALLOWED_ORIGINS"); err != nil {
+		return config{}, err
+	}
 	if cfg.ClientEvents, err = env.clientEvents("CLIENT_EVENTS"); err != nil {
 		return config{}, err
 	}
@@ -218,26 +220,38 @@ func (env environment) text(name string) string {
 	return strings.TrimSpace(value)
 }
 
-// list is one variable read as a comma-separated list, with the empty entries
-// dropped -- so a trailing comma is not an origin nobody can match.
-func (env environment) list(name string) []string {
+// origins reads a comma-separated list of browser origins. An origin has only
+// a scheme, host and optional port: paths, credentials, queries and fragments
+// never appear in the Origin header, so accepting one would start a server
+// whose allowlist no browser can satisfy.
+func (env environment) origins(name string) ([]string, error) {
 	raw := env.text(name)
 	if raw == "" {
-		return nil
+		return nil, nil
 	}
 
 	entries := strings.Split(raw, ",")
 	kept := make([]string, 0, len(entries))
 	for _, entry := range entries {
-		if entry = strings.TrimSpace(entry); entry != "" {
-			kept = append(kept, entry)
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
 		}
+
+		origin, err := url.Parse(entry)
+		if err != nil || (origin.Scheme != "http" && origin.Scheme != "https") ||
+			origin.Host == "" || origin.User != nil || origin.Path != "" || origin.RawPath != "" ||
+			origin.RawQuery != "" || origin.Fragment != "" || origin.Opaque != "" {
+			return nil, fmt.Errorf("joaju: %s%s contains %q, which is not a browser origin: write http://host or https://host, with an optional port", envPrefix, name, entry)
+		}
+
+		kept = append(kept, entry)
 	}
 	if len(kept) == 0 {
-		return nil
+		return nil, fmt.Errorf("joaju: %s%s contains no origin", envPrefix, name)
 	}
 
-	return kept
+	return kept, nil
 }
 
 // count is one variable read as a whole number. An unset variable is zero,

@@ -162,6 +162,49 @@ func TestLoadConfigReadsEveryVariable(t *testing.T) {
 	}
 }
 
+func TestLoadConfigRefusesAnOriginABrowserCannotSend(t *testing.T) {
+	t.Parallel()
+
+	for _, origin := range []string{
+		"app.example.com",
+		"ftp://app.example.com",
+		"https://user@app.example.com",
+		"https://app.example.com/path",
+		"https://app.example.com?mode=socket",
+		"https://app.example.com#socket",
+	} {
+		t.Run(origin, func(t *testing.T) {
+			t.Parallel()
+
+			vars := identity()
+			vars["JOAJU_ALLOWED_ORIGINS"] = origin
+
+			_, err := loadConfig(lookup(vars))
+			if err == nil {
+				t.Fatalf("JOAJU_ALLOWED_ORIGINS=%q was accepted", origin)
+			}
+			if !strings.Contains(err.Error(), "JOAJU_ALLOWED_ORIGINS") || !strings.Contains(err.Error(), origin) {
+				t.Fatalf("error = %v, and it does not identify the invalid origin", err)
+			}
+		})
+	}
+}
+
+func TestLoadConfigRefusesAnOriginListWithNoOrigin(t *testing.T) {
+	t.Parallel()
+
+	vars := identity()
+	vars["JOAJU_ALLOWED_ORIGINS"] = ", ,"
+
+	_, err := loadConfig(lookup(vars))
+	if err == nil {
+		t.Fatal("JOAJU_ALLOWED_ORIGINS containing no origin was accepted as no allowlist")
+	}
+	if !strings.Contains(err.Error(), "JOAJU_ALLOWED_ORIGINS") {
+		t.Fatalf("error = %v, and it does not name JOAJU_ALLOWED_ORIGINS", err)
+	}
+}
+
 func TestLoadConfigRefusesAValueItCannotRead(t *testing.T) {
 	t.Parallel()
 
@@ -176,6 +219,7 @@ func TestLoadConfigRefusesAValueItCannotRead(t *testing.T) {
 		"JOAJU_MAX_CHANNELS_PER_CONNECTION": "a hundred",
 		"JOAJU_WRITE_TIMEOUT":               "5",
 		"JOAJU_PING_INTERVAL":               "-20s",
+		"JOAJU_SHUTDOWN_TIMEOUT":            "-1s",
 		"JOAJU_CLIENT_EVENTS":               "yes please",
 		"JOAJU_LOG_LEVEL":                   "chatty",
 	} {
