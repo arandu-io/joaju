@@ -195,3 +195,24 @@ func TestLoadConfigRefusesAValueItCannotRead(t *testing.T) {
 		})
 	}
 }
+
+func TestLoadConfigRefusesNegativeOperationalCounts(t *testing.T) {
+	t.Parallel()
+
+	for _, name := range []string{"JOAJU_OUTBOUND_QUEUE", "JOAJU_MAX_MESSAGES_PER_SECOND"} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			vars := identity()
+			vars[name] = "-1"
+
+			_, err := loadConfig(lookup(vars))
+			if err == nil {
+				t.Fatalf("%s=-1 was accepted", name)
+			}
+			if !strings.Contains(err.Error(), name) {
+				t.Fatalf("error = %v, and it does not name %s", err, name)
+			}
+		})
+	}
+}

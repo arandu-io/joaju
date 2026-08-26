@@ -403,6 +403,22 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		return nil, errors.New("joaju: a server needs a SubscriptionPolicy, because subscribing to a channel is a read")
 	case cfg.Protocol == nil:
 		return nil, errors.New("joaju: a server needs a Protocol to hand a socket's frames to")
+	case cfg.MaxMessageSize < 0:
+		return nil, fmt.Errorf("joaju: ServerConfig.MaxMessageSize cannot be negative: %d", cfg.MaxMessageSize)
+	case cfg.MaxBodySize < 0:
+		return nil, fmt.Errorf("joaju: ServerConfig.MaxBodySize cannot be negative: %d", cfg.MaxBodySize)
+	case cfg.OutboundQueue < 0:
+		return nil, fmt.Errorf("joaju: ServerConfig.OutboundQueue cannot be negative: %d", cfg.OutboundQueue)
+	case cfg.MaxMessagesPerSecond < 0:
+		return nil, fmt.Errorf("joaju: ServerConfig.MaxMessagesPerSecond cannot be negative: %d", cfg.MaxMessagesPerSecond)
+	case cfg.MetricsTimeout < 0:
+		return nil, fmt.Errorf("joaju: ServerConfig.MetricsTimeout cannot be negative: %s", cfg.MetricsTimeout)
+	case cfg.WriteTimeout < 0:
+		return nil, fmt.Errorf("joaju: ServerConfig.WriteTimeout cannot be negative: %s", cfg.WriteTimeout)
+	case cfg.PingInterval < 0:
+		return nil, fmt.Errorf("joaju: ServerConfig.PingInterval cannot be negative: %s", cfg.PingInterval)
+	case cfg.PongTimeout < 0:
+		return nil, fmt.Errorf("joaju: ServerConfig.PongTimeout cannot be negative: %s", cfg.PongTimeout)
 	}
 
 	// A Relay whose Broker does not carry it is half a fleet: this server would

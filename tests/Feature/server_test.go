@@ -444,6 +444,40 @@ func TestNewServerRefusesAPongTimeoutShorterThanThePing(t *testing.T) {
 	}
 }
 
+func TestNewServerRefusesNegativeLimitsBeforeServing(t *testing.T) {
+	for _, one := range []struct {
+		name      string
+		field     string
+		configure func(*joaju.ServerConfig)
+	}{
+		{"message size", "MaxMessageSize", func(cfg *joaju.ServerConfig) { cfg.MaxMessageSize = -1 }},
+		{"body size", "MaxBodySize", func(cfg *joaju.ServerConfig) { cfg.MaxBodySize = -1 }},
+		{"outbound queue", "OutboundQueue", func(cfg *joaju.ServerConfig) { cfg.OutboundQueue = -1 }},
+		{"message rate", "MaxMessagesPerSecond", func(cfg *joaju.ServerConfig) { cfg.MaxMessagesPerSecond = -1 }},
+		{"write timeout", "WriteTimeout", func(cfg *joaju.ServerConfig) { cfg.WriteTimeout = -time.Second }},
+		{"ping interval", "PingInterval", func(cfg *joaju.ServerConfig) { cfg.PingInterval = -time.Second }},
+		{"pong timeout", "PongTimeout", func(cfg *joaju.ServerConfig) { cfg.PongTimeout = -time.Second }},
+		{"metrics timeout", "MetricsTimeout", func(cfg *joaju.ServerConfig) { cfg.MetricsTimeout = -time.Second }},
+	} {
+		t.Run(one.name, func(t *testing.T) {
+			cfg := joaju.ServerConfig{
+				AppID: serverAppID, AppKey: serverAppKey, Broker: newServerBroker(),
+				Connect: serverConnectPolicy{}, Subscribe: &serverSubscriptionPolicy{},
+				Protocol: &serverProtocol{},
+			}
+			one.configure(&cfg)
+
+			_, err := joaju.NewServer(cfg)
+			if err == nil {
+				t.Fatalf("NewServer() accepted a negative %s", one.field)
+			}
+			if !strings.Contains(err.Error(), one.field) {
+				t.Fatalf("error = %v, and it does not name %s", err, one.field)
+			}
+		})
+	}
+}
+
 func TestServerRefusesASocketFromAnotherOrigin(t *testing.T) {
 	f := newServerFixture(t, joaju.ServerConfig{})
 

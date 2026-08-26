@@ -177,13 +177,13 @@ func loadConfig(env environment) (config, error) {
 	if cfg.MaxBodySize, err = env.size("MAX_BODY_SIZE"); err != nil {
 		return config{}, err
 	}
-	if cfg.OutboundQueue, err = env.count("OUTBOUND_QUEUE"); err != nil {
+	if cfg.OutboundQueue, err = env.nonNegativeCount("OUTBOUND_QUEUE"); err != nil {
 		return config{}, err
 	}
 	if cfg.MaxConnections, err = env.count("MAX_CONNECTIONS"); err != nil {
 		return config{}, err
 	}
-	if cfg.MaxMessagesPerSecond, err = env.count("MAX_MESSAGES_PER_SECOND"); err != nil {
+	if cfg.MaxMessagesPerSecond, err = env.nonNegativeCount("MAX_MESSAGES_PER_SECOND"); err != nil {
 		return config{}, err
 	}
 	if cfg.MaxChannelsPerConnection, err = env.count("MAX_CHANNELS_PER_CONNECTION"); err != nil {
@@ -251,6 +251,22 @@ func (env environment) count(name string) (int, error) {
 	value, err := strconv.Atoi(raw)
 	if err != nil {
 		return 0, fmt.Errorf("joaju: %s%s is %q, which is not a whole number", envPrefix, name, raw)
+	}
+
+	return value, nil
+}
+
+// nonNegativeCount is count for a field where zero already means the least
+// restrictive valid value. A negative one would either disable the limit or
+// reach a channel capacity, neither of which is the configuration that was
+// written.
+func (env environment) nonNegativeCount(name string) (int, error) {
+	value, err := env.count(name)
+	if err != nil {
+		return 0, err
+	}
+	if value < 0 {
+		return 0, fmt.Errorf("joaju: %s%s is %d, and a count cannot be negative", envPrefix, name, value)
 	}
 
 	return value, nil
