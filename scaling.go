@@ -485,6 +485,9 @@ func NewRelay(ctx context.Context, id InstanceID, bus Bus, log *slog.Logger) (*R
 	if ctx == nil {
 		return nil, errors.New("joaju: a relay needs the server's context")
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("joaju: a relay cannot start after the server's context ended: %w", err)
+	}
 	if id == "" {
 		return nil, errors.New("joaju: a relay needs an instance id, or it cannot tell its own messages from its neighbours'")
 	}

@@ -677,6 +677,12 @@ func TestNewRelayRefusesWhatItCannotWorkWithout(t *testing.T) {
 	if _, err := NewRelay(context.Background(), "", newRelayTestBus(), nil); err == nil {
 		t.Fatal("a relay was built with no instance id")
 	}
+
+	ended, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := NewRelay(ended, "instance-one", newRelayTestBus(), nil); !errors.Is(err, context.Canceled) {
+		t.Fatalf("a relay built after its lifetime ended answered %v, want context.Canceled", err)
+	}
 }
 
 func TestRelayRefusesAnEventItCannotAddress(t *testing.T) {
