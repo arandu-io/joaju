@@ -92,6 +92,9 @@ var (
 	ErrMaskedServer = errors.New("ws: a frame from a server must not be masked")
 	// ErrBadOpcode is an opcode the RFC does not define.
 	ErrBadOpcode = errors.New("ws: unknown opcode")
+	// errNonMinimalLength is a payload length encoded in more bytes than its
+	// value needs, which section 5.2 forbids.
+	errNonMinimalLength = errors.New("ws: the payload length did not use its shortest encoding")
 	// ErrBadCloseCode is a close frame whose code the RFC reserves or forbids
 	// on the wire.
 	ErrBadCloseCode = errors.New("ws: the close frame carries a code that may not be sent")
@@ -175,12 +178,18 @@ func ReadFrame(r io.Reader, fromClient bool, limit int64) (Frame, error) {
 			return Frame{}, err
 		}
 		length = int64(binary.BigEndian.Uint16(ext[:]))
+		if length < 126 {
+			return Frame{}, errNonMinimalLength
+		}
 	case 127:
 		var ext [8]byte
 		if _, err := io.ReadFull(r, ext[:]); err != nil {
 			return Frame{}, err
 		}
 		n := binary.BigEndian.Uint64(ext[:])
+		if n <= 0xffff {
+			return Frame{}, errNonMinimalLength
+		}
 		// The high bit must be zero (section 5.2), and the value has to fit an
 		// int64 before it is one.
 		if n > 1<<62 {

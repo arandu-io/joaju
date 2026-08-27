@@ -313,6 +313,49 @@ func TestConnFailsTheConnectionWithTheCodeThatSaysWhy(t *testing.T) {
 	}
 }
 
+// TestConnRefusesNonMinimalPayloadLengthsAsProtocolErrors is section 5.2's
+// requirement that every payload length use its shortest wire encoding.
+// Accepting a longer form lets two byte sequences describe the same frame,
+// which the RFC requires the endpoint to fail with a protocol error.
+func TestConnRefusesNonMinimalPayloadLengthsAsProtocolErrors(t *testing.T) {
+	longLength := append([]byte{
+		0x82, 0xff, // final binary frame, masked, with a 64-bit length
+		0, 0, 0, 0, 0, 0, 0, 126,
+		0, 0, 0, 0, // masking key
+	}, make([]byte, 126)...)
+
+	for _, one := range []struct {
+		name string
+		wire []byte
+	}{
+		{
+			name: "a sixteen-bit length for an empty payload",
+			wire: []byte{0x82, 0xfe, 0, 0, 0, 0, 0, 0},
+		},
+		{
+			name: "a sixty-four-bit length for a 126-byte payload",
+			wire: longLength,
+		},
+	} {
+		t.Run(one.name, func(t *testing.T) {
+			client, server := connPair(t)
+
+			if _, err := client.conn.Write(one.wire); err != nil {
+				t.Fatalf("writing the non-minimal frame = %v", err)
+			}
+
+			_ = server.SetReadDeadline(time.Now().Add(2 * time.Second))
+			if kind, payload, err := server.ReadMessage(); err == nil {
+				t.Fatalf("the server accepted the frame as opcode %d with %d bytes", kind, len(payload))
+			}
+
+			if code := readCode(t, client); code != CloseProtocolError {
+				t.Fatalf("the server closed with %d, want %d", code, CloseProtocolError)
+			}
+		})
+	}
+}
+
 // TestConnKeepsReturningTheSameErrorAfterAFailure is what stops a caller's read
 // loop from spinning: a websocket whose framing failed cannot be resynchronised,
 // so every later call has to say so rather than block or return nothing.

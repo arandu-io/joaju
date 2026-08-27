@@ -328,6 +328,7 @@ func isTransport(err error) bool {
 	switch {
 	case errors.Is(err, ErrReservedBits), errors.Is(err, ErrUnmaskedClient),
 		errors.Is(err, ErrMaskedServer), errors.Is(err, ErrBadOpcode),
+		errors.Is(err, errNonMinimalLength),
 		errors.Is(err, ErrBadCloseCode), errors.Is(err, ErrBadUTF8),
 		errors.Is(err, ErrTooLarge), errors.Is(err, ErrBadFragment),
 		errors.Is(err, ErrControlTooLong):
