@@ -19,17 +19,17 @@ go 1.26
 // submodule is versioned: the tag is the directory plus the version, and the
 // proxy serves it under the full module path.
 require (
-	github.com/arandu-io/hesape/redis v0.5.0
+	github.com/arandu-io/hesape/redis v0.6.0
 	github.com/arandu-io/joaju v0.1.0
 )
 
 require (
-	github.com/arandu-io/hesape v0.12.0 // indirect
+	github.com/arandu-io/hesape v0.15.0 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/redis/go-redis/v9 v9.22.0 // indirect
 	go.uber.org/atomic v1.11.0 // indirect
-	golang.org/x/net v0.26.0 // indirect
 	golang.org/x/sys v0.46.0 // indirect
+	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 
 // The parent is this directory's own, so the two move together: a change to the
