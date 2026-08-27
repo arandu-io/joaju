@@ -58,6 +58,13 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The api diff step below reads the tags and checks the last release
+          # out into a second worktree. The default checkout fetches one commit
+          # and no tags at all, which does not fail that step -- it makes it
+          # find no release, say so, and pass. A gate that reports nothing and
+          # exits 0 is not a gate.
+          fetch-depth: 0
 
       - uses: actions/setup-go@v5
         with:
@@ -222,6 +229,134 @@ jobs:
             echo "$found"
             exit 1
           fi
+
+      # The fourth repository in the collection to gate on its public API, and
+      # for the same reason as the other three: something outside imports it.
+      # github.com/arandu-io/joaju is on the proxy at v0.1.0 through v0.6.0, and
+      # examples/go.mod requires it -- not for a constant, but to implement
+      # joaju.Observer and to write policies over joaju.Handshake and
+      # joaju.Subscription. Satisfying an interface this module declares is the
+      # most break-prone way to depend on it: a method added to Observer still
+      # compiles here and stops compiling there, and nothing in this repository
+      # would say so.
+      #
+      # It does not forbid an incompatible change. It requires that one be
+      # written down. Broken is allowed. Broken and unwritten is not -- while
+      # the version starts with v0. the surface is expected to move, and the
+      # whole cost of moving it should be the entry in UPGRADE.md.
+      #
+      # Both modules, through the matrix, because the answer for redis/ is not
+      # that it is too small to gate. It is that the module has never been
+      # released: there is no redis/v* tag and the proxy serves no version of
+      # github.com/arandu-io/joaju/redis, so there is no last release to compare
+      # against, and the step below says exactly that and exits 0. The day the
+      # first redis/v0.1.0 is cut this starts gating it with nobody having to
+      # remember to come back -- writing the step for the root module alone is
+      # what would need remembering.
+      - name: api diff against the last release
+        env:
+          # Through the environment rather than interpolated into the script:
+          # the value is a list of identifiers this repository invented, and a
+          # list that lands inside the shell as text is a list that can carry
+          # more than identifiers.
+          TAGS: ${{ steps.tags.outputs.list }}
+          MODULE: ${{ matrix.module }}
+        run: |
+          set -euo pipefail
+
+          # apidiff reads the DEFAULT build, so an exported symbol in a file
+          # behind a build tag is a symbol it cannot see -- and a gate with a
+          # blind spot reports "no incompatible change" about a surface it never
+          # read. Today there is no such file, and that was measured rather than
+          # assumed: e2e reaches tests/E2E and integration reaches
+          # redis/tests/Integration, `go list` gives GoFiles empty for both, so
+          # every file behind a tag in this repository is a _test.go and none of
+          # them is API.
+          #
+          # Checked here rather than written down, because the day a tag starts
+          # carrying a non-test file is the day nobody would connect it to this
+          # step going quiet. The tags come from the discovery step above, so a
+          # tag invented tomorrow is covered without being listed anywhere.
+          for tag in $TAGS; do
+            # Into variables first, and not straight into comm through two
+            # process substitutions. A go list that fails inside <(...) takes
+            # its exit code with it: comm then compares two empty lists, finds
+            # nothing, and the check passes over a module that does not even
+            # load. Assigned like this, set -e stops on it.
+            plain=$(go list -f '{{.ImportPath}} {{.GoFiles}}' ./... | sort)
+            tagged=$(go list -tags "$tag" -f '{{.ImportPath}} {{.GoFiles}}' ./... | sort)
+            hidden=$(comm -13 \
+                       <(printf '%s\n' "$plain") \
+                       <(printf '%s\n' "$tagged") \
+                     | grep -v ' \[\]$' || true)
+            if [ -n "$hidden" ]; then
+              echo "the build tag '$tag' puts a non-test file into the build:"
+              echo "$hidden" | sed 's/^/    /'
+              echo
+              echo "apidiff reads the default build and cannot see it, so the comparison"
+              echo "below would pass over whatever that file exports. Move the symbol out"
+              echo "from behind the tag, or teach this step to read the tagged build too."
+              exit 1
+            fi
+          done
+
+          # The tag namespace belongs to the module. A Go submodule is versioned
+          # by its directory plus the version, so redis/ is released as
+          # redis/vX.Y.Z and the root as vX.Y.Z. Matching 'v*' for both would
+          # compare redis/ against the root's release -- a real tree, and the
+          # wrong answer, because nobody can resolve
+          # github.com/arandu-io/joaju/redis at a version that was never tagged
+          # for it.
+          if [ "$MODULE" = '.' ]; then
+            pattern='v*'
+          else
+            pattern="$MODULE/v*"
+          fi
+
+          # Read out of go.mod rather than written here, so this cannot name one
+          # module and compare another.
+          modpath=$(go list -m)
+
+          latest=$(git tag --list "$pattern" --sort=-v:refname | head -1)
+          if [ -z "$latest" ]; then
+            echo "no release of $modpath to compare against yet"
+            exit 0
+          fi
+          echo "comparing $modpath against $latest"
+
+          tmp=$(mktemp -d)
+          old="$tmp/last-release"
+          git worktree add -q --detach "$old" "$latest"
+          # Reading the old surface has to happen in the old tree: apidiff
+          # resolves an import path against the go.mod of the directory it runs
+          # in, and from anywhere else it would read the module cache -- which
+          # holds the published release, not the tag this checkout is at.
+          (cd "$old/$MODULE" && go run golang.org/x/exp/cmd/apidiff@latest -m -w "$tmp/api.out" "$modpath")
+          broke=$(go run golang.org/x/exp/cmd/apidiff@latest -m -incompatible "$tmp/api.out" "$modpath" | grep '^- ' || true)
+          git worktree remove --force "$old"
+
+          if [ -z "$broke" ]; then
+            echo "no incompatible change since $latest"
+            exit 0
+          fi
+          echo "$broke" | sed 's/^/    /'
+
+          # Broken is allowed. Broken and unwritten is not.
+          #
+          # One UPGRADE.md for the repository and not one per module, and the
+          # path is anchored at the workspace root because this step runs from
+          # inside the module directory: a bare `-- UPGRADE.md` asked from
+          # redis/ is a question about redis/UPGRADE.md, which would find
+          # nothing and fail every release over a file that was never meant to
+          # exist.
+          if git -C "$GITHUB_WORKSPACE" diff --quiet "$latest" -- UPGRADE.md; then
+            echo
+            echo "there are incompatible changes and UPGRADE.md was not touched since $latest."
+            echo "Write what broke and what to write instead. That file is the whole mechanism."
+            exit 1
+          fi
+          echo
+          echo "incompatible changes, and UPGRADE.md was updated. Read the entry in review."
 
       # Required by doc 24: a known vulnerability blocks the merge rather than
       # showing up in a report nobody reads.
