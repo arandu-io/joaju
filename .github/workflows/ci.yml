@@ -98,19 +98,60 @@ jobs:
         if: matrix.module == '.'
         run: bash tests/test-layout-guard.sh
 
-      # With the tags, because without them the two suites that need something
+      # A replace builds a module against a directory instead of against the
+      # version everybody else resolves, so every build it passes is a build
+      # nobody outside can reproduce. redis/ carried the only one in the
+      # collection -- `replace github.com/arandu-io/joaju => ..` -- and it hid
+      # more than itself: the check that compares a go.mod against what is
+      # published skips any module carrying a replace, so adding one also
+      # silences the alarm that the requires have gone stale.
+      #
+      # Zero, in both modules. A rule with an allowance in it needs an argument
+      # every time; this one needs none, and there is nothing here it costs --
+      # the local checkout is what the workspace at the collection root is for.
+      - name: no replace directive
+        run: |
+          found=$(go mod edit -print | grep -n '^replace' || true)
+          if [ -n "$found" ]; then
+            echo "go.mod carries a replace, so this module is not built against"
+            echo "the version anybody else resolves:"
+            echo "$found"
+            exit 1
+          fi
+
+      # The tags are discovered and not listed here, because a list is the same
+      # bug one step later: a suite behind a tag nobody wrote down is a suite
+      # nobody vets, and a directory whose every .go file sits behind a tag is
+      # invisible to the default gate -- `go build ./...` and `go vet ./...` both
+      # exit 0 and print nothing about it. That is measured, not assumed; the
+      # script says where.
+      #
+      # It also refuses a tag that reaches no file, which is what a renamed
+      # constraint or a deleted directory looks like. Passing such a tag to vet
+      # is silently accepted, so this is the only place it can be caught.
+      #
+      # Per module, because `./...` stops at a nested go.mod and so does the
+      # discovery: the root module's tag is e2e, redis/'s is integration, and
+      # neither module can compile the other's files.
+      - name: build tags
+        id: tags
+        run: |
+          bash "$GITHUB_WORKSPACE/tests/build-tags.sh" check
+          echo "list=$(bash "$GITHUB_WORKSPACE/tests/build-tags.sh" list)" >> "$GITHUB_OUTPUT"
+
+      # With the tags, because without them the suites that need something
       # running -- tests/Integration, which needs a RESP server, and tests/E2E,
       # which needs a JavaScript runtime -- are not compiled at all, and a suite
       # nothing built is a suite nothing checked.
       - name: vet
-        run: go vet -tags 'integration e2e' ./...
+        run: go vet -tags '${{ steps.tags.outputs.list }}' ./...
 
       # The race detector matters more here than anywhere else in the project: a
       # connection is a goroutine, a channel is shared by every goroutine
       # subscribed to it, and a broadcast walks the subscriber set while sockets
       # are opening and closing underneath it.
       - name: test
-        run: go test -race -tags 'integration e2e' ./...
+        run: go test -race -tags '${{ steps.tags.outputs.list }}' ./...
 
       # tests/Integration skips when nothing answers, which is what keeps a
       # laptop with no RESP server green. Here the container is up and
