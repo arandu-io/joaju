@@ -83,6 +83,36 @@
 // relay's business, and putting it here would give every implementation a
 // second way to broadcast to explain.
 //
+// # One process, and the day there are two
+//
+// Everything above is finished in one process, and a deployment of one is one
+// this package serves whole. The socket, the channels, both policies, the
+// tenant rule, the presence member lists, the cache replay and every route
+// answer for the process that holds them -- which, there, is the only process
+// there is.
+//
+// A second instance changes three of those answers, and none of the three
+// announces itself:
+//
+//   - an event published on one instance reaches the sockets that instance
+//     holds, and no others;
+//   - a presence channel lists the members connected to the instance that was
+//     asked, so two subscribers of one channel are shown two different rooms;
+//   - the metrics routes count what one process holds, which is a fraction of
+//     the application and looks exactly like the whole of it.
+//
+// Nothing fails, which is why it is written here rather than left to be found:
+// each of the three is a well-formed answer to a question the caller did not
+// ask, and it is a question nobody asks until the deployment stops being one
+// binary. Until then there is nothing to configure and nothing missing.
+//
+// [Relay] is what that day needs and the whole of what it needs -- Redis
+// pub/sub, [RelayedBroker] over the [Broker] so that the channels held and the
+// channels relayed are one set, and both handed to [ServerConfig.Relay] and to
+// the [Protocol]. It carries exactly those three things. Nothing else moves:
+// the policies, the channel names, the frames and the routes are what they were,
+// and a client cannot tell a fleet of one from a fleet of ten.
+//
 // # The routes these types serve
 //
 // One, and it is the socket:
