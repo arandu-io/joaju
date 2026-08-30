@@ -44,7 +44,7 @@ go 1.26
 // in it.
 require (
 	github.com/arandu-io/hesape/redis v0.7.0
-	github.com/arandu-io/joaju v0.6.0
+	github.com/arandu-io/joaju v0.6.1
 )
 
 require (
