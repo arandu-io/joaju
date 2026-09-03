@@ -150,7 +150,16 @@ while IFS= read -r modfile; do
     # provides package v0.12.0" is. On a warm cache nothing is printed and the
     # check behaves the same; on CI, where the cache is cold every run, this is
     # the difference between measuring and failing to.
-    (cd "$dir" && GOWORK=off go mod download all >/dev/null 2>&1) || true
+    #
+    # The `all` is left off, and its absence is the point rather than a
+    # shortening. `go mod download all` walks the whole module graph and records
+    # a hash for every module it meets, down to the test-only dependencies of
+    # dependencies, so a module whose go.sum does not already carry them comes
+    # out of this guard with a tracked file rewritten -- and a guard that
+    # dirties the tree it was asked to check makes every later reading of
+    # `git status` lie. The plain form fetches the modules that provide what the
+    # main module imports, which is exactly the set `go list` below asks for.
+    (cd "$dir" && GOWORK=off go mod download >/dev/null 2>&1) || true
 
     if ! packages=$(cd "$dir" && GOWORK=off go list ./... 2>&1); then
         printf '%s\n' "$packages"
