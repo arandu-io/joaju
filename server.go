@@ -925,7 +925,8 @@ func (s *Server) newSink(conn *ws.Conn) *sink {
 	return k
 }
 
-// Send queues one frame.
+// Send queues one frame. A socket already closed queues nothing and answers
+// [ErrSocketClosed], however much room its queue still has.
 //
 // A client whose queue is full is closed rather than waited for. A broadcast
 // runs through every subscriber of a channel, so blocking on the slowest one
@@ -936,6 +937,25 @@ func (k *sink) Send(ctx context.Context, message []byte) error {
 		return err
 	}
 
+	// Whether the socket is gone is asked first, and on its own. Offering the
+	// queue and the close as two cases of one select makes them alternatives,
+	// and a select picks at random among the cases that are ready: a closed
+	// socket with room left in its queue would take about half the frames
+	// handed to it and answer nil for them, which is the one answer this method
+	// promises never to give for a socket that is closed. On a live socket the
+	// question costs a non-blocking receive on an open channel nobody sends to,
+	// which takes no lock and wakes nothing.
+	select {
+	case <-k.done:
+		return ErrSocketClosed
+	default:
+	}
+
+	// The close stays a case below for the queue that is full: it is then the
+	// only case ready, so a frame that cannot be queued on a socket that just
+	// closed is answered for as a close rather than as a client falling behind.
+	// A close arriving during this call races the call whichever case wins, and
+	// both answers are true of it.
 	select {
 	case k.out <- message:
 		return nil
