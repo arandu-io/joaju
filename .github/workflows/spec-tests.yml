@@ -59,7 +59,7 @@ jobs:
       # kept because the verdict says a case failed and not which one.
       - name: Keep the report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: autobahn-report
           path: |
