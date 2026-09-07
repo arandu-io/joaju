@@ -1,2 +1,6 @@
 github.com/arandu-io/hesape v0.21.1 h1:9jECl71klemx1lC+vvYHHttHTQ8xN/Qhgw3DsdRqkMM=
 github.com/arandu-io/hesape v0.21.1/go.mod h1:KNXJJuKrDIpWvJgNbE2LxtHkOqO4J6cqPkmMcNlxrL0=
+github.com/arandu-io/hesape v0.28.0 h1:NVQm4uV8oEWT+W6XwZS7CPYmqsTeoO2dwpE5e8OCqDk=
+github.com/arandu-io/hesape v0.28.0/go.mod h1:KNXJJuKrDIpWvJgNbE2LxtHkOqO4J6cqPkmMcNlxrL0=
+github.com/arandu-io/hesape v0.29.0 h1:rxembPnl9XuVqB/ILBf5A6zwKPmcsP2fMEuuKlIjEVI=
+github.com/arandu-io/hesape v0.29.0/go.mod h1:KNXJJuKrDIpWvJgNbE2LxtHkOqO4J6cqPkmMcNlxrL0=
