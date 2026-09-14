@@ -99,6 +99,10 @@
         // It is Pusher's own path, so an application that already has one does
         // not move it.
         authEndpoint: '/broadcasting/auth',
+        // authTimeout bounds the application request and aborts it when the
+        // endpoint does not answer. A subscription must not hang forever on a
+        // request the socket it authorizes may already have replaced.
+        authTimeout: 10000,
         // authHeaders is what goes on the authorization request on top of the
         // content type -- a CSRF token, usually.
         authHeaders: null,
@@ -399,6 +403,7 @@
         this._retryTimer = null;
         this._activityTimer = null;
         this._pongTimer = null;
+        this._authControllers = new Set();
         this._activityTimeout = this.options.activityTimeout;
         // _refusedCode and _refusedAt are the last refusal in the do-not-return
         // range and when it arrived. See FATAL_WINDOW.
@@ -431,6 +436,7 @@
     Joaju.prototype.disconnect = function () {
         this._wanted = false;
         this._clearRetry();
+        this._cancelAuthorizations();
 
         var socket = this._socket;
         if (!socket) {
@@ -700,6 +706,7 @@
     // _closed is the socket ending, for any reason.
     Joaju.prototype._closed = function (event) {
         this._clearTimers();
+        this._cancelAuthorizations();
         this._socket = null;
         this.socketId = null;
 
@@ -845,11 +852,28 @@
         body.set('socket_id', socketId);
         body.set('channel_name', channel);
 
-        return fetcher(this.options.authEndpoint, {
+        var connection = this;
+        var Controller = global.AbortController;
+        var controller = typeof Controller === 'function' ? new Controller() : null;
+        if (controller) {
+            this._authControllers.add(controller);
+        }
+
+        var timeout;
+        var timedOut = new Promise(function (_, reject) {
+            timeout = setTimeout(function () {
+                if (controller) {
+                    controller.abort();
+                }
+                reject(new Error('authorization timed out after ' + connection.options.authTimeout + 'ms'));
+            }, connection.options.authTimeout);
+        });
+        var request = fetcher(this.options.authEndpoint, {
             method: 'POST',
             credentials: 'same-origin',
             headers: headers,
-            body: body.toString()
+            body: body.toString(),
+            signal: controller ? controller.signal : undefined
         }).then(function (response) {
             if (!response.ok) {
                 throw new Error('the endpoint answered ' + response.status);
@@ -861,6 +885,27 @@
             }
             return payload;
         });
+
+        return Promise.race([request, timedOut]).then(function (payload) {
+            clearTimeout(timeout);
+            if (controller) {
+                connection._authControllers.delete(controller);
+            }
+            return payload;
+        }, function (err) {
+            clearTimeout(timeout);
+            if (controller) {
+                connection._authControllers.delete(controller);
+            }
+            throw err;
+        });
+    };
+
+    Joaju.prototype._cancelAuthorizations = function () {
+        this._authControllers.forEach(function (controller) {
+            controller.abort();
+        });
+        this._authControllers.clear();
     };
 
     // _send writes one frame, and answers whether it went.

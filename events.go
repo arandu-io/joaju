@@ -63,6 +63,8 @@ const (
 	ReasonShutdown = "shutdown"
 	// ReasonLimit is the connection limit, refused after the upgrade.
 	ReasonLimit = "limit"
+	// ReasonError is a protocol or server failure that ended the socket.
+	ReasonError = "error"
 )
 
 // NopObserver ignores everything, and is what a server without one uses.

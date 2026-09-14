@@ -36,6 +36,18 @@ func (p serverConnectPolicy) Can(context.Context, auth.Subject, auth.Action, joa
 	return p.err
 }
 
+type serverBlockingConnectPolicy struct {
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (p *serverBlockingConnectPolicy) Can(context.Context, auth.Subject, auth.Action, joaju.Handshake) error {
+	p.once.Do(func() { close(p.entered) })
+	<-p.release
+	return nil
+}
+
 // serverSubscriptionPolicy is the same for a subscription, and it records what
 // it was asked about -- which is how a test asserts that the channel a route
 // reached is the channel the policy saw.
@@ -842,7 +854,8 @@ func TestServerCountsOnlyTheConnectionsItHolds(t *testing.T) {
 }
 
 func TestServerTerminatesTheSubjectsSockets(t *testing.T) {
-	f := newServerFixture(t, joaju.ServerConfig{})
+	observer := &serverLimitObserver{}
+	f := newServerFixture(t, joaju.ServerConfig{Observer: observer})
 
 	conn, _, err := f.dial(t, "http://"+f.host(t))
 	if err != nil {
@@ -863,6 +876,9 @@ func TestServerTerminatesTheSubjectsSockets(t *testing.T) {
 	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 	if _, _, err := conn.ReadMessage(); err == nil {
 		t.Fatal("the socket was still open after its subject's connections were terminated")
+	}
+	if got := waitForClosed(t, observer, 1); len(got) != 1 || got[0] != joaju.ReasonTerminated {
+		t.Fatalf("the Observer was told %v, want one close with reason %q", got, joaju.ReasonTerminated)
 	}
 }
 
@@ -941,8 +957,10 @@ func TestServerRefusesASocketTheConnectPolicyRefuses(t *testing.T) {
 type serverLimitObserver struct {
 	joaju.NopObserver
 
-	mu      sync.Mutex
-	reasons []string
+	mu       sync.Mutex
+	reasons  []string
+	received [][]byte
+	sent     [][]byte
 }
 
 func (o *serverLimitObserver) ConnectionClosed(_ context.Context, _ joaju.SocketID, _, reason string) {
@@ -951,11 +969,227 @@ func (o *serverLimitObserver) ConnectionClosed(_ context.Context, _ joaju.Socket
 	o.reasons = append(o.reasons, reason)
 }
 
+func (o *serverLimitObserver) MessageReceived(_ context.Context, _ joaju.SocketID, message []byte) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.received = append(o.received, append([]byte(nil), message...))
+}
+
+func (o *serverLimitObserver) MessageSent(_ context.Context, _ joaju.SocketID, message []byte) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.sent = append(o.sent, append([]byte(nil), message...))
+}
+
 func (o *serverLimitObserver) closed() []string {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 
 	return append([]string(nil), o.reasons...)
+}
+
+func (o *serverLimitObserver) messages() (received, sent [][]byte) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	for _, message := range o.received {
+		received = append(received, append([]byte(nil), message...))
+	}
+	for _, message := range o.sent {
+		sent = append(sent, append([]byte(nil), message...))
+	}
+	return received, sent
+}
+
+func waitForClosed(t *testing.T, observer *serverLimitObserver, count int) []string {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		closed := observer.closed()
+		if len(closed) >= count || time.Now().After(deadline) {
+			return closed
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+func TestServerObservesRealFramesOnceAndReportsAnAbnormalClose(t *testing.T) {
+	observer := &serverLimitObserver{}
+	f := newServerFixture(t, joaju.ServerConfig{Observer: observer})
+
+	conn, _, err := f.dial(t, "http://"+f.host(t))
+	if err != nil {
+		t.Fatalf("dialling = %v", err)
+	}
+	f.skipOpenFrame(t, conn)
+
+	const frame = `{"event":"application.message"}`
+	if err := conn.WriteMessage(ws.TextMessage, []byte(frame)); err != nil {
+		t.Fatalf("writing the application frame = %v", err)
+	}
+	if held := f.waitFor(t, frame); len(held) != 1 || held[0] != frame {
+		t.Fatalf("the Protocol received %v, want the application frame once", held)
+	}
+
+	received, sent := observer.messages()
+	if len(received) != 1 || string(received[0]) != frame {
+		t.Fatalf("MessageReceived saw %q, want %q exactly once", received, frame)
+	}
+	if len(sent) != 1 || string(sent[0]) != `{"event":"opened"}` {
+		t.Fatalf("MessageSent saw %q, want the real open frame exactly once", sent)
+	}
+
+	if err := conn.WriteMessage(ws.CloseMessage, ws.FormatClose(ws.CloseProtocolError, "bad frame")); err != nil {
+		t.Fatalf("writing an abnormal close = %v", err)
+	}
+	if got := waitForClosed(t, observer, 1); len(got) != 1 || got[0] != joaju.ReasonError {
+		t.Fatalf("the Observer was told %v, want one close with reason %q", got, joaju.ReasonError)
+	}
+}
+
+func TestServerReportsAReadDeadlineAsATimeout(t *testing.T) {
+	observer := &serverLimitObserver{}
+	f := newServerFixture(t, joaju.ServerConfig{
+		Observer:     observer,
+		PingInterval: 20 * time.Millisecond,
+		PongTimeout:  100 * time.Millisecond,
+	})
+
+	conn, _, err := f.dial(t, "http://"+f.host(t))
+	if err != nil {
+		t.Fatalf("dialling = %v", err)
+	}
+	f.skipOpenFrame(t, conn)
+	// Stop reading here. The test client only handles the server's WebSocket
+	// ping while ReadMessage is running, so this deliberately withholds a pong.
+	if got := waitForClosed(t, observer, 1); len(got) != 1 || got[0] != joaju.ReasonTimeout {
+		t.Fatalf("the Observer was told %v, want one close with reason %q", got, joaju.ReasonTimeout)
+	}
+}
+
+type serverBlockingCloseProtocol struct {
+	serverProtocol
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (p *serverBlockingCloseProtocol) Close(ctx context.Context, conn *joaju.Connection) {
+	p.once.Do(func() { close(p.entered) })
+	<-p.release
+	p.serverProtocol.Close(ctx, conn)
+}
+
+func TestServerCloseRejectsNewSocketsAndWaitsForConnectionCleanup(t *testing.T) {
+	observer := &serverLimitObserver{}
+	protocol := &serverBlockingCloseProtocol{
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	f := newServerFixture(t, joaju.ServerConfig{Observer: observer, Protocol: protocol})
+
+	conn, _, err := f.dial(t, "http://"+f.host(t))
+	if err != nil {
+		t.Fatalf("dialling = %v", err)
+	}
+	f.skipOpenFrame(t, conn)
+
+	closed := make(chan struct{})
+	go func() {
+		f.server.Close(context.Background())
+		close(closed)
+	}()
+	select {
+	case <-protocol.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("connection cleanup did not start during Close")
+	}
+	select {
+	case <-closed:
+		t.Fatal("Close returned before Protocol.Close finished")
+	default:
+	}
+
+	newConn, response, err := f.dial(t, "http://"+f.host(t))
+	if err == nil {
+		_ = newConn.Close()
+		t.Fatal("a new socket opened after Close started")
+	}
+	if response == nil || response.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("a socket after Close answered %v, want %d", response, http.StatusServiceUnavailable)
+	}
+
+	close(protocol.release)
+	select {
+	case <-closed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close did not return after connection cleanup finished")
+	}
+	if got := observer.closed(); len(got) != 1 || got[0] != joaju.ReasonShutdown {
+		t.Fatalf("the Observer was told %v, want one close with reason %q", got, joaju.ReasonShutdown)
+	}
+}
+
+func TestServerCloseTerminatesAHandshakeAlreadyInFlight(t *testing.T) {
+	observer := &serverLimitObserver{}
+	connect := &serverBlockingConnectPolicy{entered: make(chan struct{}), release: make(chan struct{})}
+	f := newServerFixture(t, joaju.ServerConfig{Observer: observer, Connect: connect})
+
+	type dialResult struct {
+		conn     *ws.Conn
+		response *http.Response
+		err      error
+	}
+	dialled := make(chan dialResult, 1)
+	go func() {
+		dialer := *ws.DefaultDialer
+		dialer.HandshakeTimeout = 5 * time.Second
+		header := http.Header{"Origin": []string{"http://" + f.host(t)}}
+		conn, response, err := dialer.Dial(f.socketURL(serverAppKey), header)
+		dialled <- dialResult{conn: conn, response: response, err: err}
+	}()
+	select {
+	case <-connect.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the handshake did not reach the ConnectPolicy")
+	}
+
+	closed := make(chan struct{})
+	go func() {
+		f.server.Close(context.Background())
+		close(closed)
+	}()
+	select {
+	case <-closed:
+		t.Fatal("Close returned while the in-flight handshake still owned a worker")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(connect.release)
+
+	var result dialResult
+	select {
+	case result = <-dialled:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the in-flight handshake did not finish")
+	}
+	if result.response != nil {
+		defer func() { _ = result.response.Body.Close() }()
+	}
+	if result.err != nil {
+		t.Fatalf("the in-flight upgrade itself failed = %v", result.err)
+	}
+	defer func() { _ = result.conn.Close() }()
+	_ = result.conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if _, _, err := result.conn.ReadMessage(); err == nil {
+		t.Fatal("the in-flight socket survived shutdown")
+	}
+	select {
+	case <-closed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close did not finish after the in-flight socket was terminated")
+	}
+	if got := observer.closed(); len(got) != 1 || got[0] != joaju.ReasonShutdown {
+		t.Fatalf("the Observer was told %v, want one close with reason %q", got, joaju.ReasonShutdown)
+	}
 }
 
 // A socket refused because the tenant is full is told 4004, and told it before

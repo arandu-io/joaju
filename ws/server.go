@@ -2,6 +2,7 @@ package ws
 
 import (
 	"bufio"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -84,6 +85,10 @@ func (u *Upgrader) Upgrade(w http.ResponseWriter, r *http.Request, responseHeade
 	key := r.Header.Get("Sec-Websocket-Key")
 	if key == "" {
 		return nil, refuse(w, http.StatusBadRequest, "the Sec-WebSocket-Key header is missing")
+	}
+	decodedKey, err := base64.StdEncoding.DecodeString(key)
+	if err != nil || len(decodedKey) != 16 {
+		return nil, refuse(w, http.StatusBadRequest, "the Sec-WebSocket-Key header must be base64 for 16 bytes")
 	}
 
 	hijacker, ok := w.(http.Hijacker)
