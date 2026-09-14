@@ -175,6 +175,16 @@ func TestUpgradeRefusesEveryHandshakeThatIsNotOne(t *testing.T) {
 			headers: map[string]string{"Sec-WebSocket-Key": ""},
 			want:    http.StatusBadRequest,
 		},
+		{
+			name:    "a key that is not base64",
+			headers: map[string]string{"Sec-WebSocket-Key": "not base64"},
+			want:    http.StatusBadRequest,
+		},
+		{
+			name:    "a decoded key that is not sixteen bytes",
+			headers: map[string]string{"Sec-WebSocket-Key": "dG9vIHNob3J0"},
+			want:    http.StatusBadRequest,
+		},
 	} {
 		t.Run(one.name, func(t *testing.T) {
 			method := one.method

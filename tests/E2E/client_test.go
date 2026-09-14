@@ -257,6 +257,12 @@ func newE2EServer(t *testing.T, activityTimeout time.Duration, swallowPing bool,
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /broadcasting/auth", e2eAuthorize)
+	mux.HandleFunc("POST /broadcasting/hang", func(_ http.ResponseWriter, r *http.Request) {
+		select {
+		case <-r.Context().Done():
+		case <-time.After(5 * time.Second):
+		}
+	})
 	mux.Handle("/", server)
 
 	front := httptest.NewServer(e2eSubjects(mux, subjects...))
@@ -440,6 +446,21 @@ func TestTheClientReconnectsAndResubscribes(t *testing.T) {
 	}
 	if got := number(t, result, "held"); got != 2 {
 		t.Errorf("the client holds %v channels after resubscribing, want 2: a second copy is a second seat", got)
+	}
+}
+
+func TestTheClientBoundsAChannelAuthorizationRequest(t *testing.T) {
+	server := newE2EServer(t, time.Minute, false, "ana")
+	result := runScenario(t, "auth-timeout.js", server.environment())
+
+	if got := number(t, result, "code"); got != 0 {
+		t.Errorf("the client-side authorization failure used code %v, want 0", got)
+	}
+	if message := text(t, result, "message"); !strings.Contains(message, "authorization timed out") {
+		t.Errorf("the authorization failure was %q, want the finite timeout", message)
+	}
+	if elapsed := number(t, result, "elapsed"); elapsed > 1000 {
+		t.Errorf("the 75ms authorization timeout took %vms", elapsed)
 	}
 }
 

@@ -22,6 +22,11 @@ import (
 // subscriber and takes the channel down with it.
 var ErrSocketClosed = errors.New("joaju: the socket is closed")
 
+// errServerClosed is an upgrade that was already in flight when shutdown
+// started. It is distinct from ErrConnectionLimit because shutdown must not be
+// reported to the client or Observer as a tenant quota decision.
+var errServerClosed = errors.New("joaju: the server is closed")
+
 // The defaults [NewServer] fills in for a zero [ServerConfig] field.
 const (
 	// DefaultMaxMessageSize is the largest frame a client may send, and is the
@@ -379,8 +384,11 @@ type Server struct {
 	// observer is never nil. See [NopObserver] for why.
 	observer Observer
 
-	mu    sync.RWMutex
-	conns map[SocketID]*Connection
+	mu           sync.RWMutex
+	conns        map[SocketID]*Connection
+	closeReasons map[SocketID]string
+	closed       bool
+	workers      sync.WaitGroup
 	// perTenant is how many sockets each tenant holds, and it is what the
 	// limit is checked against. Kept beside conns rather than counted from it
 	// because counting a map of ten thousand on every upgrade is work that
@@ -453,6 +461,7 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		maxConnections: cfg.MaxConnections,
 		observer:       cfg.Observer,
 		conns:          make(map[SocketID]*Connection),
+		closeReasons:   make(map[SocketID]string),
 		perTenant:      make(map[string]int),
 	}
 	if s.observer == nil {
@@ -593,14 +602,18 @@ func (s *Server) Terminate(ctx context.Context, g auth.Grant, subject string) (i
 		return 0, errors.New("joaju: terminating connections needs a subject to terminate them for")
 	}
 
-	s.mu.RLock()
+	s.mu.Lock()
+	if s.closeReasons == nil {
+		s.closeReasons = make(map[SocketID]string)
+	}
 	doomed := make([]*Connection, 0, len(s.conns))
 	for _, c := range s.conns {
 		if c.Tenant() == tenant && c.Subject().ID == subject {
 			doomed = append(doomed, c)
+			s.closeReasons[c.ID()] = ReasonTerminated
 		}
 	}
-	s.mu.RUnlock()
+	s.mu.Unlock()
 
 	for _, c := range doomed {
 		if err := c.Terminate(ctx); err != nil {
@@ -629,20 +642,49 @@ func registryTenant(g auth.Grant) (string, error) {
 // Close terminates every socket this server holds. It is what a shutdown calls,
 // and it takes no Grant because it crosses every tenant on purpose.
 func (s *Server) Close(ctx context.Context) {
-	s.mu.RLock()
+	s.mu.Lock()
+	s.closed = true
+	if s.closeReasons == nil {
+		s.closeReasons = make(map[SocketID]string)
+	}
 	doomed := make([]*Connection, 0, len(s.conns))
 	for _, c := range s.conns {
 		doomed = append(doomed, c)
+		s.closeReasons[c.ID()] = ReasonShutdown
 	}
-	s.mu.RUnlock()
+	s.mu.Unlock()
 
 	for _, c := range doomed {
 		_ = c.Terminate(ctx)
+	}
+	if s.relay != nil {
+		_ = s.relay.close(ctx)
+	}
+
+	wait := make(chan struct{})
+	go func() {
+		s.workers.Wait()
+		close(wait)
+	}()
+	select {
+	case <-wait:
+	case <-ctx.Done():
+		return
 	}
 }
 
 // handleSocket is GET /app/{appKey}: the socket itself.
 func (s *Server) handleSocket(w http.ResponseWriter, r *http.Request) {
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		s.refuse(w, r, http.StatusServiceUnavailable, "The server is shutting down.", nil)
+		return
+	}
+	s.workers.Add(1)
+	s.mu.Unlock()
+	defer s.workers.Done()
+
 	if r.PathValue("appKey") != s.appKey {
 		s.refuse(w, r, http.StatusNotFound, "Unknown app.", nil)
 		return
@@ -683,7 +725,7 @@ func (s *Server) handleSocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sink := s.newSink(socket)
+	sink := s.newSink(socket, id)
 	conn, err := NewConnection(grant, id, sink)
 	if err != nil {
 		// A Grant that got this far and is refused here is a wiring mistake --
@@ -733,8 +775,13 @@ func (s *Server) refuse(w http.ResponseWriter, r *http.Request, status int, mess
 func (s *Server) read(r *http.Request, conn *Connection, socket *ws.Conn) {
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
+	reason := ReasonClient
 
-	if err := s.register(conn); err != nil {
+	if err := s.register(conn); errors.Is(err, errServerClosed) {
+		s.observer.ConnectionClosed(ctx, conn.ID(), conn.Tenant(), ReasonShutdown)
+		_ = conn.Terminate(context.WithoutCancel(ctx))
+		return
+	} else if err != nil {
 		s.log.WarnContext(ctx, "joaju: the connection was refused by the tenant's limit",
 			slog.String("socket", string(conn.ID())), slog.String("tenant", conn.Tenant()))
 		// The refusal is written before the socket goes. A socket that only
@@ -760,13 +807,14 @@ func (s *Server) read(r *http.Request, conn *Connection, socket *ws.Conn) {
 	}
 	s.observer.ConnectionOpened(ctx, conn.ID(), conn.Tenant())
 	defer func() {
-		s.unregister(conn)
-		s.observer.ConnectionClosed(ctx, conn.ID(), conn.Tenant(), ReasonClient)
+		reason = s.unregister(conn, reason)
+		s.observer.ConnectionClosed(ctx, conn.ID(), conn.Tenant(), reason)
 		s.protocol.Close(ctx, conn)
 		_ = conn.Terminate(context.WithoutCancel(ctx))
 	}()
 
 	if err := s.protocol.Open(ctx, conn); err != nil {
+		reason = ReasonError
 		s.log.WarnContext(ctx, "joaju: the connection was dropped before it was established",
 			slog.String("socket", string(conn.ID())), slog.Any("error", err))
 		return
@@ -790,6 +838,24 @@ func (s *Server) read(r *http.Request, conn *Connection, socket *ws.Conn) {
 	for {
 		kind, message, err := socket.ReadMessage()
 		if err != nil {
+			knownReason := false
+			var netErr interface{ Timeout() bool }
+			if errors.As(err, &netErr) && netErr.Timeout() {
+				reason = ReasonTimeout
+				knownReason = true
+			} else if ws.IsUnexpectedClose(err, ws.CloseNormalClosure, ws.CloseGoingAway) {
+				reason = ReasonError
+				knownReason = true
+			} else if ws.IsProtocolError(err) {
+				reason = ReasonError
+				knownReason = true
+			} else {
+				var closeErr *ws.CloseError
+				knownReason = errors.As(err, &closeErr)
+			}
+			if knownReason {
+				s.recordReadCloseReason(conn.ID(), reason)
+			}
 			if ws.IsUnexpectedClose(err, ws.CloseNormalClosure, ws.CloseGoingAway) {
 				s.log.InfoContext(ctx, "joaju: the socket ended",
 					slog.String("socket", string(conn.ID())), slog.Any("error", err))
@@ -797,6 +863,7 @@ func (s *Server) read(r *http.Request, conn *Connection, socket *ws.Conn) {
 			return
 		}
 		_ = socket.SetReadDeadline(time.Now().Add(s.pongTimeout))
+		s.observer.MessageReceived(ctx, conn.ID(), message)
 
 		// Counted here, where a frame the client sent has arrived and nothing
 		// has acted on it yet. The WebSocket ping and pong never reach this
@@ -847,6 +914,9 @@ func (s *Server) register(conn *Connection) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if s.closed {
+		return errServerClosed
+	}
 	tenant := conn.Tenant()
 	if s.maxConnections > 0 && s.perTenant[tenant] >= s.maxConnections {
 		return ErrConnectionLimit
@@ -857,15 +927,21 @@ func (s *Server) register(conn *Connection) error {
 	return nil
 }
 
-func (s *Server) unregister(conn *Connection) {
+func (s *Server) unregister(conn *Connection, fallback string) string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	reason := fallback
+	if recorded := s.closeReasons[conn.ID()]; recorded != "" {
+		reason = recorded
+	}
+	delete(s.closeReasons, conn.ID())
 
 	if _, held := s.conns[conn.ID()]; !held {
 		// Never registered -- refused by the limit, and its slot was never
 		// taken. Decrementing here would let a refused connection lower the
 		// count for the ones that were admitted.
-		return
+		return reason
 	}
 	delete(s.conns, conn.ID())
 
@@ -874,9 +950,37 @@ func (s *Server) unregister(conn *Connection) {
 		// The map entry goes when the last one does, so a tenant that connected
 		// once and left costs nothing for the life of the process.
 		delete(s.perTenant, tenant)
-		return
+		return reason
 	}
 	s.perTenant[tenant]--
+	return reason
+}
+
+func (s *Server) recordCloseReason(id SocketID, reason string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, registered := s.conns[id]; !registered {
+		return
+	}
+	if s.closeReasons == nil {
+		s.closeReasons = make(map[SocketID]string)
+	}
+	if s.closeReasons[id] == "" {
+		s.closeReasons[id] = reason
+	}
+}
+
+func (s *Server) recordReadCloseReason(id SocketID, reason string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closeReasons == nil {
+		s.closeReasons = make(map[SocketID]string)
+	}
+	switch s.closeReasons[id] {
+	case ReasonShutdown, ReasonTerminated:
+		return
+	}
+	s.closeReasons[id] = reason
 }
 
 // newSocketID mints a socket id in the shape Pusher's clients print,
@@ -904,23 +1008,40 @@ func newSocketID() (SocketID, error) {
 // writes.
 type sink struct {
 	conn         *ws.Conn
-	out          chan []byte
+	out          chan outboundMessage
 	done         chan struct{}
 	once         sync.Once
+	id           SocketID
+	observer     Observer
+	failure      func()
 	writeTimeout time.Duration
 	pingInterval time.Duration
 }
 
+type outboundMessage struct {
+	ctx     context.Context
+	payload []byte
+}
+
 // newSink wraps the socket and starts its writer.
-func (s *Server) newSink(conn *ws.Conn) *sink {
+func (s *Server) newSink(conn *ws.Conn, id SocketID) *sink {
 	k := &sink{
-		conn:         conn,
-		out:          make(chan []byte, s.outboundQueue),
-		done:         make(chan struct{}),
+		conn:     conn,
+		out:      make(chan outboundMessage, s.outboundQueue),
+		done:     make(chan struct{}),
+		id:       id,
+		observer: s.observer,
+		failure: func() {
+			s.recordCloseReason(id, ReasonError)
+		},
 		writeTimeout: s.writeTimeout,
 		pingInterval: s.pingInterval,
 	}
-	go k.write()
+	s.workers.Add(1)
+	go func() {
+		defer s.workers.Done()
+		k.write()
+	}()
 
 	return k
 }
@@ -957,14 +1078,14 @@ func (k *sink) Send(ctx context.Context, message []byte) error {
 	// A close arriving during this call races the call whichever case wins, and
 	// both answers are true of it.
 	select {
-	case k.out <- message:
+	case k.out <- outboundMessage{ctx: ctx, payload: message}:
 		return nil
 	case <-k.done:
 		return ErrSocketClosed
 	default:
 	}
 
-	k.close()
+	k.fail()
 
 	return fmt.Errorf("%w: it fell behind by more than %d frames", ErrSocketClosed, cap(k.out))
 }
@@ -980,6 +1101,13 @@ func (k *sink) Terminate(context.Context) error {
 
 func (k *sink) close() {
 	k.once.Do(func() { close(k.done) })
+}
+
+func (k *sink) fail() {
+	if k.failure != nil {
+		k.failure()
+	}
+	k.close()
 }
 
 // write is the one goroutine that writes to this socket.
@@ -998,14 +1126,15 @@ func (k *sink) write() {
 		select {
 		case message := <-k.out:
 			_ = k.conn.SetWriteDeadline(time.Now().Add(k.writeTimeout))
-			if err := k.conn.WriteMessage(ws.TextMessage, message); err != nil {
-				k.close()
+			if err := k.conn.WriteMessage(ws.TextMessage, message.payload); err != nil {
+				k.fail()
 				return
 			}
+			k.observer.MessageSent(message.ctx, k.id, message.payload)
 		case <-ticker.C:
 			_ = k.conn.SetWriteDeadline(time.Now().Add(k.writeTimeout))
 			if err := k.conn.WriteMessage(ws.PingMessage, nil); err != nil {
-				k.close()
+				k.fail()
 				return
 			}
 		case <-k.done:
@@ -1036,9 +1165,10 @@ func (k *sink) flush() {
 		select {
 		case message := <-k.out:
 			_ = k.conn.SetWriteDeadline(time.Now().Add(k.writeTimeout))
-			if err := k.conn.WriteMessage(ws.TextMessage, message); err != nil {
+			if err := k.conn.WriteMessage(ws.TextMessage, message.payload); err != nil {
 				return
 			}
+			k.observer.MessageSent(message.ctx, k.id, message.payload)
 		default:
 			return
 		}

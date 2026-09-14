@@ -2,6 +2,7 @@ package joaju
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"testing"
@@ -144,7 +145,7 @@ func TestARefusedConnectionDoesNotFreeSomebodyElsesSlot(t *testing.T) {
 	}
 
 	// The refused one unwinds through the same defer the admitted one uses.
-	s.unregister(refused)
+	s.unregister(refused, ReasonClient)
 
 	if got := s.perTenant["acme"]; got != 1 {
 		t.Fatalf("the tenant holds %d connections, want 1 -- the refused one freed a slot it never took", got)
@@ -165,10 +166,56 @@ func TestTheTenantIsForgottenWhenItsLastConnectionLeaves(t *testing.T) {
 	if err := s.register(c); err != nil {
 		t.Fatal(err)
 	}
-	s.unregister(c)
+	s.unregister(c, ReasonClient)
 
 	if _, held := s.perTenant["acme"]; held {
 		t.Error("the tenant is still in the map after its last connection left")
+	}
+}
+
+func TestShutdownRefusesAConnectionThatWasAlreadyInFlight(t *testing.T) {
+	s := &Server{
+		conns:        make(map[SocketID]*Connection),
+		perTenant:    make(map[string]int),
+		observer:     NopObserver{},
+		pingInterval: time.Hour,
+	}
+	// This worker is the request that passed handleSocket's first closed check
+	// but has not reached register yet.
+	s.workers.Add(1)
+	done := make(chan struct{})
+	go func() {
+		s.Close(context.Background())
+		close(done)
+	}()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		s.mu.RLock()
+		closed := s.closed
+		s.mu.RUnlock()
+		if closed {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("Close did not mark the server closed")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	if err := s.register(connFor(t, "acme", "late")); !errors.Is(err, errServerClosed) {
+		t.Fatalf("register during shutdown = %v, want errServerClosed", err)
+	}
+	select {
+	case <-done:
+		t.Fatal("Close returned before its in-flight handler ended")
+	default:
+	}
+	s.workers.Done()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close did not return after its in-flight handler ended")
 	}
 }
 

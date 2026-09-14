@@ -711,17 +711,28 @@ func (r *Relay) carry(ctx context.Context, e Event) {
 // It is idempotent, and after it every [Relay.Join] and [Relay.Publish] answers
 // [ErrRelayClosed] rather than working on a relay whose goroutines are gone.
 func (r *Relay) Close() error {
+	return r.close(context.Background())
+}
+
+func (r *Relay) close(ctx context.Context) error {
 	r.mu.Lock()
-	if r.closed {
-		r.mu.Unlock()
-		return nil
+	if !r.closed {
+		r.closed = true
+		r.joined = make(map[string]relayed)
+		r.cancel()
 	}
-	r.closed = true
-	r.joined = make(map[string]relayed)
 	r.mu.Unlock()
 
-	r.cancel()
-	r.wg.Wait()
+	done := make(chan struct{})
+	go func() {
+		r.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 
 	return nil
 }

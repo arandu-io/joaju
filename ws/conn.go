@@ -64,6 +64,13 @@ func IsUnexpectedClose(err error, expected ...int) bool {
 	return true
 }
 
+// IsProtocolError reports whether err is a WebSocket framing or message
+// violation rather than a transport failure. It lets a server distinguish a
+// malformed peer from a connection that simply disappeared.
+func IsProtocolError(err error) bool {
+	return !isTransport(err)
+}
+
 // Conn is one WebSocket connection.
 //
 // # Concurrency
@@ -185,12 +192,21 @@ func (c *Conn) ReadMessage() (messageType int, p []byte, err error) {
 		limit := c.readLimit
 		if limit > 0 {
 			limit -= int64(len(message))
-			if limit <= 0 {
+			if limit < 0 {
 				return 0, nil, c.failRead(ErrTooLarge)
 			}
 		}
 
-		frame, err := ReadFrame(c.br, !c.isClient, limit)
+		frameLimit := limit
+		if c.readLimit > 0 && frameLimit < maxControlPayload {
+			// A fragmented message may end with an empty continuation after
+			// reaching the limit exactly, and a control frame may arrive between
+			// any two fragments without counting toward that limit. Read enough
+			// for every valid control frame, then apply the message limit below
+			// once the opcode is known.
+			frameLimit = maxControlPayload
+		}
+		frame, err := ReadFrame(c.br, !c.isClient, frameLimit)
 		if err != nil {
 			return 0, nil, c.failRead(err)
 		}
@@ -200,6 +216,9 @@ func (c *Conn) ReadMessage() (messageType int, p []byte, err error) {
 				return 0, nil, err
 			}
 			continue
+		}
+		if c.readLimit > 0 && int64(len(message))+int64(len(frame.Payload)) > c.readLimit {
+			return 0, nil, c.failRead(ErrTooLarge)
 		}
 
 		switch {

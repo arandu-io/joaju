@@ -17,7 +17,7 @@ import (
 // Send and Terminate never do.
 func sendTestSink(queue int) *sink {
 	return &sink{
-		out:          make(chan []byte, queue),
+		out:          make(chan outboundMessage, queue),
 		done:         make(chan struct{}),
 		writeTimeout: DefaultWriteTimeout,
 		pingInterval: DefaultPingInterval,

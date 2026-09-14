@@ -183,6 +183,25 @@ func TestConnRefusesToWriteAfterTheCloseFrame(t *testing.T) {
 	}
 }
 
+func TestConnAcceptsAFragmentedMessageAtTheExactReadLimit(t *testing.T) {
+	client, server := connPair(t)
+	server.SetReadLimit(4)
+
+	go func() {
+		_ = client.write(Frame{Final: false, Opcode: BinaryMessage, Payload: []byte{1, 2, 3, 4}})
+		_ = client.write(Frame{Final: true, Opcode: PingMessage, Payload: []byte("still here")})
+		_ = client.write(Frame{Final: true, Opcode: ContinuationFrame})
+	}()
+
+	kind, payload, err := server.ReadMessage()
+	if err != nil {
+		t.Fatalf("reading at the exact limit = %v", err)
+	}
+	if kind != BinaryMessage || !bytes.Equal(payload, []byte{1, 2, 3, 4}) {
+		t.Fatalf("message = opcode %d payload %v", kind, payload)
+	}
+}
+
 // TestConnFailsTheConnectionWithTheCodeThatSaysWhy is what the Autobahn suite
 // spends most of its cases on: not whether the connection ends, but whether the
 // peer is told which rule it broke.
@@ -413,6 +432,15 @@ func TestIsUnexpectedCloseSortsTheOrdinaryEndingsFromTheRest(t *testing.T) {
 	}
 	if IsUnexpectedClose(errors.New("read tcp: connection reset by peer"), expected...) {
 		t.Error("a transport error was reported as a close code")
+	}
+}
+
+func TestIsProtocolErrorDistinguishesFramesFromTheNetwork(t *testing.T) {
+	if !IsProtocolError(ErrBadFragment) {
+		t.Fatal("ErrBadFragment was not recognized as a protocol error")
+	}
+	if IsProtocolError(net.ErrClosed) {
+		t.Fatal("net.ErrClosed was recognized as a protocol error")
 	}
 }
 
