@@ -1,5 +1,15 @@
 # Release Notes
 
+## [v0.7.2](https://github.com/arandu-io/joaju/compare/redis/v0.1.2...v0.7.2) - 2026-10-03
+
+## What's Changed
+* Bump the github-actions group across 1 directory with 2 updates by @dependabot[bot] in https://github.com/arandu-io/joaju/pull/4
+
+## New Contributors
+* @dependabot[bot] made their first contribution in https://github.com/arandu-io/joaju/pull/4
+
+**Full Changelog**: https://github.com/arandu-io/joaju/compare/redis/v0.1.2...v0.7.2
+
 ## [v0.7.1](https://github.com/arandu-io/joaju/compare/v0.7.0...v0.7.1) - 2026-09-17
 
 **Full Changelog**: https://github.com/arandu-io/joaju/compare/v0.7.0...v0.7.1
