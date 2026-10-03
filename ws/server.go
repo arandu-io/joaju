@@ -91,15 +91,18 @@ func (u *Upgrader) Upgrade(w http.ResponseWriter, r *http.Request, responseHeade
 		return nil, refuse(w, http.StatusBadRequest, "the Sec-WebSocket-Key header must be base64 for 16 bytes")
 	}
 
-	hijacker, ok := w.(http.Hijacker)
-	if !ok {
+	// The writer is asked through a ResponseController rather than by a type
+	// assertion, because the handler rarely holds the server's own writer: every
+	// middleware that records a status or queues a cookie wraps it, and a wrapper
+	// that embeds the writer hides Hijack from an assertion while still exposing
+	// the inner writer through Unwrap. The controller follows that chain.
+	netConn, brw, err := http.NewResponseController(w).Hijack()
+	if errors.Is(err, http.ErrNotSupported) {
 		// HTTP/2 is the usual reason: there is no connection to hijack, because
 		// the request is a stream on a shared one. A websocket over HTTP/2 is
 		// RFC 8441 and a different handshake entirely.
 		return nil, refuse(w, http.StatusInternalServerError, "this connection cannot be upgraded")
 	}
-
-	netConn, brw, err := hijacker.Hijack()
 	if err != nil {
 		return nil, refuse(w, http.StatusInternalServerError, "the connection could not be taken over")
 	}

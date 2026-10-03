@@ -332,3 +332,69 @@ func TestWriteAcceptStripsALineBreakFromAHeaderValue(t *testing.T) {
 		t.Fatal("a header value split the response")
 	}
 }
+
+// unwrapOnly is the shape of every ResponseWriter a middleware puts in front of
+// the handler: it embeds the inner writer, which hides Hijack from a type
+// assertion, and exposes the inner writer through Unwrap.
+type unwrapOnly struct{ http.ResponseWriter }
+
+func (w unwrapOnly) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
+// TestUpgradeReachesTheConnectionThroughWrappedWriters is the request that went
+// through a session, a cookie and a status middleware before reaching the
+// handler. Each layer wraps the writer, none implements Hijack, all implement
+// Unwrap, and the upgrade has to find the connection under them.
+func TestUpgradeReachesTheConnectionThroughWrappedWriters(t *testing.T) {
+	upgrader := &Upgrader{HandshakeTimeout: 5 * time.Second}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		wrapped := unwrapOnly{unwrapOnly{unwrapOnly{w}}}
+		conn, err := upgrader.Upgrade(wrapped, r, nil)
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		kind, message, err := conn.ReadMessage()
+		if err != nil {
+			return
+		}
+		_ = conn.WriteMessage(kind, message)
+	}))
+	defer server.Close()
+
+	conn, response, err := DefaultDialer.Dial(socketURL(server), nil)
+	if err != nil {
+		status := 0
+		if response != nil {
+			status = response.StatusCode
+		}
+		t.Fatalf("dialling through three wrapped writers = %v (status %d)", err, status)
+	}
+	defer func() { _ = conn.Close() }()
+
+	if err := conn.WriteMessage(TextMessage, []byte("pipeline")); err != nil {
+		t.Fatalf("writing = %v", err)
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, got, err := conn.ReadMessage(); err != nil || string(got) != "pipeline" {
+		t.Fatalf("echo = %q, %v", got, err)
+	}
+}
+
+// TestUpgradeStillRefusesAWriterWithNoConnection keeps the refusal for a writer
+// nothing under it can hijack, which is what an HTTP/2 stream looks like.
+func TestUpgradeStillRefusesAWriterWithNoConnection(t *testing.T) {
+	upgrader := &Upgrader{HandshakeTimeout: 5 * time.Second}
+	r := httptest.NewRequest(http.MethodGet, "http://example.test/ws", nil)
+	r.Header.Set("Connection", "Upgrade")
+	r.Header.Set("Upgrade", "websocket")
+	r.Header.Set("Sec-WebSocket-Version", "13")
+	r.Header.Set("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
+	recorder := httptest.NewRecorder()
+
+	if _, err := upgrader.Upgrade(unwrapOnly{recorder}, r, nil); err == nil {
+		t.Fatal("a writer with no connection under it was upgraded")
+	}
+	if recorder.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusInternalServerError)
+	}
+}
