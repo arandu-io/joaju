@@ -2,8 +2,8 @@ github.com/arandu-io/hesape v0.52.0 h1:QSVs9Wc8sBzqb8iFJ3CMS8ih87hxY24ldN4Y6H7YT
 github.com/arandu-io/hesape v0.52.0/go.mod h1:EGvD/xu7BKqX/sT4p/XN+igAb5tBagA/VwoEqeVV1b0=
 github.com/arandu-io/hesape/redis v0.11.0 h1:0Zx5EpYlPskple08uw+QNsDhQf1CrRVcIjhc6nnZ1dI=
 github.com/arandu-io/hesape/redis v0.11.0/go.mod h1:wSEoeCqNG0OR6uZW6xpEFvFZjLZbw6V2cpkUxU2uAsE=
-github.com/arandu-io/joaju v0.7.2 h1:7H0XL8HKme8ifNPNBBvwQ/tVXRhYiYJ2ZjKn3BkZtko=
-github.com/arandu-io/joaju v0.7.2/go.mod h1:sXseai21d5l9c/t0QUFidJfNV3+5szokDfloB42GLLM=
+github.com/arandu-io/joaju v0.7.3 h1:bqVvPcSx6SxnA4GTLU65ClzOCXLtAbwlGLpTRxbvjUY=
+github.com/arandu-io/joaju v0.7.3/go.mod h1:jrFHmEApHGoULLgVxrJb4uFLtJFRHFPF1G6vMbHHygc=
 github.com/bsm/ginkgo/v2 v2.12.0 h1:Ny8MWAHyOepLGlLKYmXG4IEkioBysk6GpaRTLC8zwWs=
 github.com/bsm/ginkgo/v2 v2.12.0/go.mod h1:SwYbGRRDovPVboqFv0tPTcG1sN61LM1Z4ARdbAV9g4c=
 github.com/bsm/gomega v1.27.10 h1:yeMWxP2pV2fG3FgAODIY8EiRE3dy0aeFYt4l7wh6yKA=
