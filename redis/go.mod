@@ -1,6 +1,6 @@
 module github.com/arandu-io/joaju/redis
 
-go 1.26
+go 1.26.0
 
 // The bus, and its own module because of what is under it.
 //
@@ -43,15 +43,15 @@ go 1.26
 // takes no argument: zero is cheaper to enforce than any rule with an allowance
 // in it.
 require (
-	github.com/arandu-io/hesape/redis v0.10.1
-	github.com/arandu-io/joaju v0.7.1
+	github.com/arandu-io/hesape/redis v0.11.0
+	github.com/arandu-io/joaju v0.7.2
 )
 
 require (
-	github.com/arandu-io/hesape v0.41.1 // indirect
+	github.com/arandu-io/hesape v0.52.0 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/redis/go-redis/v9 v9.22.0 // indirect
 	go.uber.org/atomic v1.11.0 // indirect
-	golang.org/x/sys v0.47.0 // indirect
+	golang.org/x/sys v0.48.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
