@@ -1,6 +1,6 @@
 module github.com/arandu-io/joaju
 
-go 1.26
+go 1.26.0
 
 // ws/ is this project's own WebSocket implementation of RFC 6455, and it is the
 // reason the dependency list is as short as it is: the surface the server uses
@@ -16,4 +16,4 @@ go 1.26
 // to a channel is a read and RULE 17 has no exception, and redis for the
 // pub/sub that lets two instances agree on who is connected where.
 
-require github.com/arandu-io/hesape v0.41.1
+require github.com/arandu-io/hesape v0.52.0
