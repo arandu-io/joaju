@@ -60,3 +60,13 @@ with `auth.ErrForbidden`.
 
 `cmd/joaju` keeps working unchanged for a caller that signs with the app
 secret: its policy allows the signed application and nobody else.
+
+### The POST routes require `Content-Type: application/json`
+
+`events`, `batch_events` and `terminate_connections` answer **415** to a POST
+whose `Content-Type` is not `application/json` (parameters such as
+`; charset=utf-8` are accepted), before the body is read or anything is done.
+Every Pusher server library already sends that type; a hand-written caller that
+sent none, or `text/plain`, has to add the header. The reason is the cross-site
+form: a browser posts a form or `text/plain` body to another origin without a
+preflight and with the cookies attached.

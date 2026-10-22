@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"mime"
 	"net/http"
 	"strings"
 
@@ -398,6 +399,11 @@ func (api routes) terminate(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	// The body is not read, and the type is still required: this is the route a
+	// cross-site form would most like to reach. See [routes.declaresJSON].
+	if !api.declaresJSON(w, r) {
+		return
+	}
 
 	// The tenant comes off the Grant, so a caller naming another customer's
 	// user id closes nothing: the registry matches on both, and the userId in
@@ -516,14 +522,41 @@ func (api routes) reach(ctx context.Context, subject auth.Subject, name joaju.Ch
 	})
 }
 
-// decode reads a JSON body of at most [joaju.API.MaxBodySize].
+// decode reads a JSON body of at most [joaju.API.MaxBodySize], from a request
+// that says it is JSON.
 func (api routes) decode(w http.ResponseWriter, r *http.Request, into any) bool {
+	if !api.declaresJSON(w, r) {
+		return false
+	}
+
 	r.Body = http.MaxBytesReader(w, r.Body, api.MaxBodySize)
 	// Unknown fields are ignored rather than refused: the Pusher HTTP API has
 	// fields this server does not read -- "info" is one -- and a client SDK
 	// that sends one is not making a mistake.
 	if err := json.NewDecoder(r.Body).Decode(into); err != nil {
 		api.refuse(w, r, http.StatusBadRequest, "The body is not the JSON this route reads.", err)
+
+		return false
+	}
+
+	return true
+}
+
+// declaresJSON refuses a POST whose Content-Type is not application/json, and
+// answers whether the request may go on.
+//
+// Every Pusher server library sends that type on every POST it makes, so a
+// legitimate publisher never meets this. What does meet it is a cross-site
+// form: a browser sends a form or text/plain POST to another origin without a
+// preflight and with the cookies attached, and a route that read its body
+// anyway would let any page a signed-in operator visits publish or terminate
+// in their name. application/json cannot be sent cross-site without the
+// preflight the host application has to allow first.
+func (api routes) declaresJSON(w http.ResponseWriter, r *http.Request) bool {
+	media, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if err != nil || media != "application/json" {
+		api.refuse(w, r, http.StatusUnsupportedMediaType, "The body has to be application/json.",
+			fmt.Errorf("joaju: the Content-Type is %q, and this route reads application/json", r.Header.Get("Content-Type")))
 
 		return false
 	}

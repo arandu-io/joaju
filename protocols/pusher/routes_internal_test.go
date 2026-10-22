@@ -152,6 +152,10 @@ func routeTestCall(t *testing.T, api joaju.API, method, path, tenant, body strin
 	}
 
 	request := httptest.NewRequest(method, path, payload)
+	if method == http.MethodPost {
+		// What every Pusher server library sends, and what the routes require.
+		request.Header.Set("Content-Type", "application/json")
+	}
 	request = request.WithContext(auth.WithSubject(request.Context(), auth.Subject{ID: "caller", Tenant: tenant}))
 
 	answer := httptest.NewRecorder()

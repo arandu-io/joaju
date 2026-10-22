@@ -1643,3 +1643,72 @@ func TestServerRegistryRefusesAGrantIssuedForASocket(t *testing.T) {
 		t.Errorf("Connections() with an Operate Grant = %v, want nil", err)
 	}
 }
+
+// A POST that does not say it is JSON is refused before anything is read or
+// done, because a browser sends a form or text/plain POST to another origin
+// without a preflight and with the cookies attached.
+func TestServerRefusesAPostThatIsNotDeclaredJSON(t *testing.T) {
+	news := &serverChannel{name: tests.ChannelName(t, "news")}
+	f := newServerFixture(t, joaju.ServerConfig{}, news)
+
+	conn, _, err := f.dial(t, "http://"+f.host(t))
+	if err != nil {
+		t.Fatalf("dialling = %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if _, _, err := conn.ReadMessage(); err != nil {
+		t.Fatalf("reading the first frame = %v", err)
+	}
+
+	event := `{"name":"forged","data":"{}","channel":"news"}`
+	for _, call := range []struct{ path, contentType, body string }{
+		{"/apps/" + serverAppID + "/events", "text/plain", event},
+		{"/apps/" + serverAppID + "/events", "application/x-www-form-urlencoded", event},
+		{"/apps/" + serverAppID + "/events", "", event},
+		{"/apps/" + serverAppID + "/batch_events", "text/plain", `{"batch":[` + event + `]}`},
+		{"/apps/" + serverAppID + "/users/u1/terminate_connections", "text/plain", `{}`},
+		{"/apps/" + serverAppID + "/users/u1/terminate_connections", "", ``},
+	} {
+		request, err := http.NewRequest(http.MethodPost, f.http.URL+call.path, strings.NewReader(call.body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if call.contentType != "" {
+			request.Header.Set("Content-Type", call.contentType)
+		}
+		response, err := f.http.Client().Do(request)
+		if err != nil {
+			t.Fatalf("POST %s = %v", call.path, err)
+		}
+		_ = response.Body.Close()
+		if response.StatusCode != http.StatusUnsupportedMediaType {
+			t.Errorf("POST %s as %q answered %d, want %d", call.path, call.contentType, response.StatusCode, http.StatusUnsupportedMediaType)
+		}
+	}
+
+	if got := news.events(); len(got) != 0 {
+		t.Errorf("the channel received %v, want nothing: a refused POST published", got)
+	}
+	if _, body := f.get(t, "/apps/"+serverAppID+"/connections"); strings.TrimSpace(string(body)) != `{"connections":1}` {
+		t.Errorf("after the refused terminations the count was %s, want the socket still open", body)
+	}
+}
+
+func TestServerAcceptsJSONWithACharset(t *testing.T) {
+	news := &serverChannel{name: tests.ChannelName(t, "news")}
+	f := newServerFixture(t, joaju.ServerConfig{}, news)
+
+	response, err := f.http.Client().Post(f.http.URL+"/apps/"+serverAppID+"/events", "application/json; charset=utf-8",
+		strings.NewReader(`{"name":"OrderShipped","data":"{}","channel":"news"}`))
+	if err != nil {
+		t.Fatalf("POST /events = %v", err)
+	}
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("POST /events as application/json; charset=utf-8 answered %d, want %d", response.StatusCode, http.StatusOK)
+	}
+	if got := news.events(); len(got) != 1 {
+		t.Fatalf("the channel received %d events, want 1", len(got))
+	}
+}
