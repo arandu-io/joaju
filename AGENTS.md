@@ -78,13 +78,16 @@ missing by accident.
 
 ## The two rules everything else follows from
 
-**Two decisions, each issuing a Grant.** One says whether a subject may hold a
-socket at all (`Connect`, decided by a `ConnectPolicy`). The other says whether
-a subject may hear one channel (`broadcasting.ChannelJoin`, decided by a
-`SubscriptionPolicy`), and it is asked again for every channel and on every
-route that touches one. A `Connection` cannot be built without a Grant and a
-`ChannelName` cannot be built without one either, so there is no path to a
-channel that a policy did not open.
+**Three decisions, each issuing a Grant.** One says whether a subject may hold
+a socket at all (`Connect`, decided by a `ConnectPolicy`, asked only on the
+socket route). One says whether a subject may hear one channel
+(`broadcasting.ChannelJoin`, decided by a `SubscriptionPolicy`), and it is asked
+again for every channel and on every route that touches one. One says whether a
+subject may operate the server through the HTTP API -- publish, terminate, list
+(`Operate`, decided by an `OperationPolicy`); with no `OperationPolicy` every
+API route is refused, and a `ConnectPolicy` never answers for the API. A
+`Connection` cannot be built without a Grant and a `ChannelName` cannot be built
+without one either, so there is no path to a channel that a policy did not open.
 
 **The tenant comes from the Grant.** `auth.Tenant(g)`, read by
 `NewChannelName`, and never from a path segment, a body, a query or a header.
