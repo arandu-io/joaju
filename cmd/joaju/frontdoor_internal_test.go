@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -51,12 +52,15 @@ func TestSigningStringIsThePusherCanonicalForm(t *testing.T) {
 		paramAuthKey:       {testAppKey},
 		paramAuthTimestamp: {"1353684343"},
 		"auth_version":     {"1.0"},
-		// The digest as the caller sent it, which is dropped and recomputed. It
-		// is the documented one, so recomputing has to produce it again.
+		// The digest as the caller sent it, which is signed as it is. It is the
+		// documented one, and the digest of the body above.
 		paramBodyMD5: {"ec365a775a4cd0599faeb73354201b6f"},
 	}
 
-	got := signingString(http.MethodPost, "/apps/3/events", query, []byte(body))
+	got := signingString(http.MethodPost, "/apps/3/events", query)
+	if err := bodyMatches(query, []byte(body)); err != nil {
+		t.Fatalf("the documented body does not match its documented digest: %v", err)
+	}
 	want := "POST\n/apps/3/events\n" +
 		"auth_key=278d425bdf160c739803" +
 		"&auth_timestamp=1353684343" +
@@ -75,30 +79,60 @@ func TestSigningStringIsThePusherCanonicalForm(t *testing.T) {
 	}
 }
 
-func TestSigningStringLeavesOutTheSignatureAndRecomputesTheDigest(t *testing.T) {
+func TestSigningStringLeavesOutTheSignatureAndSignsTheDigestTheCallerSent(t *testing.T) {
 	t.Parallel()
 
-	// body_md5 as it arrived is dropped and computed again from the body, so a
-	// caller cannot sign one digest and send another payload. The signature
-	// itself is dropped because it is the thing being computed.
+	// The signature is dropped because it is the thing being computed. The
+	// digest is signed as the caller sent it, which is what lets the signature
+	// be checked before the body is read; the body is held to it afterwards by
+	// bodyMatches.
 	query := url.Values{
 		paramAuthSignature: {"whatever the caller sent"},
-		paramBodyMD5:       {"a digest of something else"},
+		paramBodyMD5:       {"99914b932bd37a50b983c5e7c90ae93b"},
 		paramAuthKey:       {testAppKey},
 		paramAuthTimestamp: {"1353684343"},
 	}
 
-	signing := signingString(http.MethodPost, "/apps/3/events", query, []byte("{}"))
+	signing := signingString(http.MethodPost, "/apps/3/events", query)
 
 	if strings.Contains(signing, "whatever the caller sent") {
 		t.Error("the signature the caller sent is inside the string it is compared against")
 	}
-	if strings.Contains(signing, "a digest of something else") {
-		t.Error("the digest the caller sent was signed instead of the body that arrived")
-	}
-	// md5 of "{}", which is what a body of "{}" has to produce.
 	if want := paramBodyMD5 + "=99914b932bd37a50b983c5e7c90ae93b"; !strings.Contains(signing, want) {
 		t.Errorf("signing string = %q, and it does not carry %q", signing, want)
+	}
+}
+
+func TestBodyMatchesHoldsTheBodyToTheSignedDigest(t *testing.T) {
+	t.Parallel()
+
+	// md5 of "{}", which is what a body of "{}" has to produce.
+	const braces = "99914b932bd37a50b983c5e7c90ae93b"
+
+	for name, one := range map[string]struct {
+		query url.Values
+		body  string
+		ok    bool
+	}{
+		"the digest of the body":         {url.Values{paramBodyMD5: {braces}}, "{}", true},
+		"no body and no digest":          {url.Values{}, "", true},
+		"the digest of another body":     {url.Values{paramBodyMD5: {braces}}, `{"other":"body"}`, false},
+		"a body and no digest":           {url.Values{}, "{}", false},
+		"a digest and no body":           {url.Values{paramBodyMD5: {braces}}, "", false},
+		"an empty digest for a body":     {url.Values{paramBodyMD5: {""}}, "{}", false},
+		"the digest in another spelling": {url.Values{paramBodyMD5: {strings.ToUpper(braces)}}, "{}", false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			err := bodyMatches(one.query, []byte(one.body))
+			if one.ok && err != nil {
+				t.Fatalf("bodyMatches() = %v, want nil", err)
+			}
+			if !one.ok && err == nil {
+				t.Fatal("bodyMatches() = nil, and the body is not the one the digest names")
+			}
+		})
 	}
 }
 
@@ -111,7 +145,7 @@ func TestSigningStringSortsTheQueryAndKeepsTheMethodAndPath(t *testing.T) {
 		paramAuthTimestamp: {"1353684343"},
 	}
 
-	signing := signingString(http.MethodGet, "/apps/3/channels", query, nil)
+	signing := signingString(http.MethodGet, "/apps/3/channels", query)
 	lines := strings.Split(signing, "\n")
 	if len(lines) != 3 {
 		t.Fatalf("signing string = %q, want three lines", signing)
@@ -169,7 +203,10 @@ func sign(t *testing.T, method, path, body string) *http.Request {
 		paramAuthTimestamp: {strconv.FormatInt(testClock.Unix(), 10)},
 		"auth_version":     {"1.0"},
 	}
-	query.Set(paramAuthSignature, signature([]byte(testAppSecret), signingString(method, path, query, []byte(body))))
+	if body != "" {
+		query.Set(paramBodyMD5, hex.EncodeToString(digest([]byte(body))))
+	}
+	query.Set(paramAuthSignature, signature([]byte(testAppSecret), signingString(method, path, query)))
 
 	return httptest.NewRequest(method, path+"?"+query.Encode(), strings.NewReader(body))
 }
@@ -215,12 +252,18 @@ func TestFrontDoorRefusesWhatItCannotVerify(t *testing.T) {
 			q.Set(paramAuthKey, "another key entirely")
 		},
 		"a signature for another body": func(q url.Values) {
+			q.Set(paramBodyMD5, hex.EncodeToString(digest([]byte(`{"other":"body"}`))))
 			q.Set(paramAuthSignature, signature([]byte(testAppSecret),
-				signingString(http.MethodPost, "/apps/3/events", q, []byte(`{"other":"body"}`))))
+				signingString(http.MethodPost, "/apps/3/events", q)))
+		},
+		"the digest left out": func(q url.Values) {
+			q.Del(paramBodyMD5)
+			q.Set(paramAuthSignature, signature([]byte(testAppSecret),
+				signingString(http.MethodPost, "/apps/3/events", q)))
 		},
 		"a signature under another secret": func(q url.Values) {
 			q.Set(paramAuthSignature, signature([]byte("not the secret"),
-				signingString(http.MethodPost, "/apps/3/events", q, []byte("{}"))))
+				signingString(http.MethodPost, "/apps/3/events", q)))
 		},
 		"no timestamp":      func(q url.Values) { q.Del(paramAuthTimestamp) },
 		"a stale timestamp": func(q url.Values) { q.Set(paramAuthTimestamp, stale) },
@@ -299,5 +342,64 @@ func TestFrontDoorRefusesABodyLargerThanTheServerReads(t *testing.T) {
 	}
 	if response.Code != http.StatusRequestEntityTooLarge {
 		t.Fatalf("status = %d, want %d", response.Code, http.StatusRequestEntityTooLarge)
+	}
+}
+
+// countingBody is a request body that records how much of it was taken.
+type countingBody struct {
+	r    io.Reader
+	read int
+}
+
+func (b *countingBody) Read(p []byte) (int, error) {
+	n, err := b.r.Read(p)
+	b.read += n
+
+	return n, err
+}
+
+func (b *countingBody) Close() error { return nil }
+
+// An anonymous caller must not be able to make this process buffer a body: the
+// signature is checked from the query alone, and a caller that does not hold
+// the secret is refused with its body unread.
+func TestFrontDoorReadsNoBodyBeforeTheSignatureVerifies(t *testing.T) {
+	t.Parallel()
+
+	for name, corrupt := range map[string]func(url.Values){
+		"no signature at all": func(q url.Values) { q.Del(paramAuthSignature) },
+		"a guessed signature": func(q url.Values) { q.Set(paramAuthSignature, strings.Repeat("0", 64)) },
+		"another application": func(q url.Values) { q.Set(paramAuthKey, "another key entirely") },
+		"no query whatsoever": func(q url.Values) { clear(q) },
+		"a signature for a GET": func(q url.Values) {
+			q.Set(paramAuthSignature, signature([]byte(testAppSecret), signingString(http.MethodGet, "/apps/3/events", q)))
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			door, seen := door(t)
+			payload := strings.Repeat("x", 512<<10)
+
+			signed := sign(t, http.MethodPost, "/apps/3/events", payload)
+			query := signed.URL.Query()
+			corrupt(query)
+			signed.URL.RawQuery = query.Encode()
+			body := &countingBody{r: strings.NewReader(payload)}
+			signed.Body = body
+
+			response := httptest.NewRecorder()
+			door.ServeHTTP(response, signed)
+
+			if response.Code != http.StatusUnauthorized {
+				t.Fatalf("status = %d, want %d", response.Code, http.StatusUnauthorized)
+			}
+			if seen.reached {
+				t.Fatal("the request reached the server")
+			}
+			if body.read != 0 {
+				t.Fatalf("the front door read %d bytes of an unverified caller's body, want none", body.read)
+			}
+		})
 	}
 }

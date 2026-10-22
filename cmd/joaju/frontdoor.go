@@ -97,9 +97,9 @@ type frontDoor struct {
 	secret []byte
 	// tenant is what every subject minted here carries.
 	tenant string
-	// maxBody bounds what is read before the body is digested. It is the
-	// server's own MaxBodySize, resolved by the caller, so that the limit a
-	// request meets here is the limit it would have met inside.
+	// maxBody bounds the body of a caller whose signature already verified. It
+	// is the server's own MaxBodySize, resolved by the caller, so that the
+	// limit a request meets here is the limit it would have met inside.
 	maxBody int64
 	// now is time.Now, and a fixed clock in a test.
 	now func() time.Time
@@ -124,8 +124,23 @@ func (d frontDoor) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// The body is read here because body_md5 is inside the signed string, and it
-	// is put back because the route behind this reads it too. The limit is the
+	// The signature is verified before a byte of the body is read. It covers
+	// the body through body_md5, which is a query parameter, so the query alone
+	// says whether the caller holds the secret -- and a caller that does not is
+	// refused having cost this process a header parse, not a megabyte of
+	// buffered body.
+	query := r.URL.Query()
+	if err := d.verify(r, query); err != nil {
+		// The sentence names the parameter that was wrong and goes to the log;
+		// the caller is told that the signature was invalid and nothing else,
+		// for the reason [joaju.Server] gives about its own refusals: a refusal
+		// that explains itself is a refusal that helps whoever is guessing.
+		d.refuse(w, r, http.StatusUnauthorized, "Authentication signature invalid.", err)
+		return
+	}
+
+	// Only now is the body read, for a caller that proved the secret, and put
+	// back because the route behind this reads it too. The limit is the
 	// server's, so a body too large is refused with the same number in both
 	// places.
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, d.maxBody))
@@ -140,11 +155,10 @@ func (d frontDoor) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	r.Body = io.NopCloser(bytes.NewReader(body))
 
-	if err := d.verify(r, body); err != nil {
-		// The sentence names the parameter that was wrong and goes to the log;
-		// the caller is told that the signature was invalid and nothing else,
-		// for the reason [joaju.Server] gives about its own refusals: a refusal
-		// that explains itself is a refusal that helps whoever is guessing.
+	// The signature covered the digest the caller wrote down. This is what ties
+	// that digest to the body that actually arrived, so a caller cannot sign
+	// one payload and send another.
+	if err := bodyMatches(query, body); err != nil {
 		d.refuse(w, r, http.StatusUnauthorized, "Authentication signature invalid.", err)
 		return
 	}
@@ -166,14 +180,15 @@ func (d frontDoor) application() auth.Subject {
 	}
 }
 
-// verify checks the Pusher signature on an API request.
+// verify checks the Pusher signature on an API request, from its query alone.
 //
 // The order is the cheapest refusal first: the key names the wrong application,
 // the stamp is outside the window, and only then the HMAC -- which is the one
 // step that costs anything and the one that must not leak how far a guess got.
-func (d frontDoor) verify(r *http.Request, body []byte) error {
-	query := r.URL.Query()
-
+// The body is not an argument: its digest is a query parameter the signature
+// covers, and [bodyMatches] compares it with the body once the caller has
+// proved the secret.
+func (d frontDoor) verify(r *http.Request, query url.Values) error {
 	if key := query.Get(paramAuthKey); key != d.appKey {
 		return fmt.Errorf("%s is %q and this server answers for another application", paramAuthKey, key)
 	}
@@ -187,7 +202,7 @@ func (d frontDoor) verify(r *http.Request, body []byte) error {
 		return fmt.Errorf("%s is %s away from now, and this server accepts %s", paramAuthTimestamp, skew.Round(time.Second), signatureWindow)
 	}
 
-	want := signature(d.secret, signingString(r.Method, r.URL.EscapedPath(), query, body))
+	want := signature(d.secret, signingString(r.Method, r.URL.EscapedPath(), query))
 	// hmac.Equal and not ==, because the comparison of a secret-derived value
 	// against one a caller chose is exactly the comparison whose duration says
 	// how many leading characters were right.
@@ -217,29 +232,21 @@ func (d frontDoor) refuse(w http.ResponseWriter, r *http.Request, status int, me
 //
 // The query is every parameter except the signature itself, sorted by name and
 // written "name=value" joined by "&" -- unescaped, because what is signed is
-// what the caller wrote and not what it put on the wire. body_md5 is dropped
-// from what arrived and recomputed here when there is a body, so a caller cannot
-// sign one digest and send another payload.
+// what the caller wrote and not what it put on the wire. body_md5 is signed as
+// the caller sent it, which is what lets the signature be checked before the
+// body is read; [bodyMatches] is what holds the body to it afterwards.
 //
 // appId, appKey and channelName are not in the query at all: they are path
 // values and never appear in a URL query, so there is nothing to drop.
-//
-// The digest is MD5 because the protocol says MD5. It is not being trusted as a
-// hash function on its own -- it is inside an HMAC-SHA256 over the whole string
-// -- and changing it would mean no Pusher client could sign a request this
-// server accepts.
-func signingString(method, path string, query url.Values, body []byte) string {
-	params := make(map[string]string, len(query)+1)
+func signingString(method, path string, query url.Values) string {
+	params := make(map[string]string, len(query))
 	for name, values := range query {
-		if name == paramAuthSignature || name == paramBodyMD5 {
+		if name == paramAuthSignature {
 			continue
 		}
 		if len(values) > 0 {
 			params[name] = values[0]
 		}
-	}
-	if len(body) > 0 {
-		params[paramBodyMD5] = hex.EncodeToString(digest(body))
 	}
 
 	pairs := make([]string, 0, len(params))
@@ -248,6 +255,36 @@ func signingString(method, path string, query url.Values, body []byte) string {
 	}
 
 	return method + "\n" + path + "\n" + strings.Join(pairs, "&")
+}
+
+// bodyMatches holds the body that arrived to the body_md5 the signature
+// covered.
+//
+// A body needs a digest, because a signature without one says nothing about
+// the payload. A digest needs the body it names, even an empty one: the
+// caller signed that claim, and a claim that does not hold is a forgery or a
+// broken client, and neither is served.
+//
+// The digest is MD5 because the protocol says MD5. It is not being trusted as a
+// hash function on its own -- the value it is compared with sits inside an
+// HMAC-SHA256 over the whole query -- and changing it would mean no Pusher
+// client could sign a request this server accepts.
+func bodyMatches(query url.Values, body []byte) error {
+	claimed, present := query[paramBodyMD5]
+	if !present {
+		if len(body) > 0 {
+			return fmt.Errorf("the request carries a body and no %s, so the signature does not cover it", paramBodyMD5)
+		}
+
+		return nil
+	}
+
+	actual := hex.EncodeToString(digest(body))
+	if len(claimed) == 0 || !hmac.Equal([]byte(claimed[0]), []byte(actual)) {
+		return fmt.Errorf("%s does not match the body that arrived", paramBodyMD5)
+	}
+
+	return nil
 }
 
 // signature is the hex HMAC-SHA256 of the signing string under the app secret,

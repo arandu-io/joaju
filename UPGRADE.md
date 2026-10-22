@@ -70,3 +70,19 @@ Every Pusher server library already sends that type; a hand-written caller that
 sent none, or `text/plain`, has to add the header. The reason is the cross-site
 form: a browser posts a form or `text/plain` body to another origin without a
 preflight and with the cookies attached.
+
+### `cmd/joaju` checks the signature before it reads the body
+
+The front door of the standalone server used to read up to `MaxBodySize` (1 MiB
+by default) of every `/apps/...` request before it checked the signature, so
+an anonymous caller could make it buffer a megabyte per request. It now
+verifies the HMAC from the query alone -- `body_md5` is a signed query
+parameter -- and reads the body only for a caller that proved the app secret,
+then requires the body to match the signed `body_md5`.
+
+Every Pusher server library signs and sends `body_md5` whenever there is a
+body, and keeps working. What is refused now and was accepted before: a request
+with a body whose query carries no `body_md5` (the old code recomputed the
+digest and could accept a client that signed it without sending it), and a
+`body_md5` that does not match the body that arrived, including one sent with
+an empty body. Both answer 401.
