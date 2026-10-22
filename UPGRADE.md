@@ -145,3 +145,10 @@ next subscriber, so any subscriber allowed to send client events could replace
 the state the server last published. Client events are still relayed, and are
 no longer cached; the replay is the last event the server published. An event
 named `client-...` published through the HTTP API is not cached either.
+
+### `GET /apps/{appId}/channels` works in `cmd/joaju`
+
+The standalone server's subscription policy refused the question the channel
+list asks -- about no channel in particular -- so the route always answered
+403. It now allows the signed application to list the tenant's channels, and
+still refuses everybody else.

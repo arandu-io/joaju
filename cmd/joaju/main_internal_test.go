@@ -158,3 +158,19 @@ func TestASocketOutlivesTheHTTPServersTimeouts(t *testing.T) {
 		t.Fatalf("the answer to a ping = %q, want pusher:pong", answer)
 	}
 }
+
+// The channel list is the collection question: the route asks the
+// SubscriptionPolicy about no channel in particular before it lists them.
+func TestTheProcessListsChannelsForTheApplication(t *testing.T) {
+	t.Parallel()
+
+	handler := process(t)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, signedJSON(t, http.MethodGet, "/apps/3/channels", ""))
+	if w.Code != http.StatusOK {
+		t.Fatalf("GET /apps/3/channels answered %d %s, want %d", w.Code, w.Body, http.StatusOK)
+	}
+	if body := strings.TrimSpace(w.Body.String()); body != `{"channels":{}}` {
+		t.Fatalf("an empty process listed %s, want no channels", body)
+	}
+}

@@ -135,7 +135,15 @@ func (p subscriptionPolicy) Can(_ context.Context, s auth.Subject, a auth.Action
 		return fmt.Errorf("this process serves the tenant %q and the subject carries %q", p.tenant, s.Tenant)
 	}
 	if sub.Channel.IsZero() {
-		return fmt.Errorf("the subscription named no channel")
+		// No channel is the collection question: the channel list asks whether
+		// this subject may see the tenant's channels at all before it lists
+		// them. Only the application may, for the reason it may reach every
+		// guarded channel below; a socket always names the channel it wants.
+		if s.HasRole(roleApplication) {
+			return nil
+		}
+
+		return fmt.Errorf("the subscription named no channel, and only the application may list them")
 	}
 
 	if !sub.Channel.Type().Guarded() {

@@ -426,3 +426,23 @@ func TestSubscriptionPolicyAnswersOnlyItsOwnAction(t *testing.T) {
 		t.Fatalf("error = %v, want auth.ErrForbidden", err)
 	}
 }
+
+func TestSubscriptionPolicyAnswersTheCollectionQuestionForTheApplicationOnly(t *testing.T) {
+	t.Parallel()
+
+	policy := subscriptions()
+
+	// The zero Subscription is what the channel list asks about.
+	if _, err := auth.Authorize(context.Background(), policy, application(testTenant),
+		broadcasting.ChannelJoin, joaju.Subscription{}); err != nil {
+		t.Errorf("the application was refused the channel list: %v", err)
+	}
+	if _, err := auth.Authorize(context.Background(), policy, browser(testTenant),
+		broadcasting.ChannelJoin, joaju.Subscription{}); !errors.Is(err, auth.ErrForbidden) {
+		t.Errorf("error = %v, want auth.ErrForbidden: a browser was allowed the channel list", err)
+	}
+	if _, err := auth.Authorize(context.Background(), policy, application("another"),
+		broadcasting.ChannelJoin, joaju.Subscription{}); !errors.Is(err, auth.ErrForbidden) {
+		t.Errorf("error = %v, want auth.ErrForbidden: another tenant's application was allowed the channel list", err)
+	}
+}
