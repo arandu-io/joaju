@@ -26,8 +26,8 @@ const envPrefix = "JOAJU_"
 // Everything a [joaju.ServerConfig] already has a Default for is left at zero
 // and filled in by [joaju.NewServer] -- that is the struct's stated convention,
 // and repeating a number here would be a second place to read it from. These
-// three have no counterpart there because they belong to the process and not to
-// the server.
+// have no counterpart there because they belong to the process and not to the
+// server.
 const (
 	// defaultAddr is the address the server listens on when none was given.
 	// The port is the one a client's configuration expects by default.
@@ -37,15 +37,22 @@ const (
 	// sockets it holds. See [shutdown] for what happens in that window.
 	defaultShutdownTimeout = 10 * time.Second
 	// defaultReadHeaderTimeout bounds how long a client may take to send its
-	// request headers.
+	// request headers, and defaultReadTimeout how long it may take to send the
+	// whole request, body included.
 	//
-	// It is the one http.Server timeout this process sets. ReadTimeout and
-	// WriteTimeout would be wrong here: a WebSocket is hijacked out of net/http
-	// and its deadlines are the ones [joaju.ServerConfig] carries -- PongTimeout
-	// on the read side, WriteTimeout on the write side -- so a second pair set
-	// on the http.Server would be a second answer to the same question, and the
-	// stricter of the two would end sockets that are behaving.
+	// A WebSocket is hijacked out of net/http, and its deadlines are the ones
+	// [joaju.ServerConfig] carries -- PongTimeout on the read side,
+	// WriteTimeout on the write side -- which the server sets on the
+	// connection before it reads or writes a frame. These four therefore bound
+	// HTTP requests only. See [newHTTPServer].
 	defaultReadHeaderTimeout = 10 * time.Second
+	defaultReadTimeout       = 30 * time.Second
+	// defaultWriteTimeout bounds how long an answer may take to reach the
+	// client, measured from the end of the request headers.
+	defaultWriteTimeout = 30 * time.Second
+	// defaultIdleTimeout is how long a keep-alive connection may sit between
+	// requests before it is closed.
+	defaultIdleTimeout = 120 * time.Second
 )
 
 // config is what this process reads out of its environment, already parsed.

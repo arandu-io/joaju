@@ -86,3 +86,13 @@ with a body whose query carries no `body_md5` (the old code recomputed the
 digest and could accept a client that signed it without sending it), and a
 `body_md5` that does not match the body that arrived, including one sent with
 an empty body. Both answer 401.
+
+### `cmd/joaju` bounds the whole HTTP request
+
+The standalone server's `http.Server` set only `ReadHeaderTimeout`. It now also
+sets `ReadTimeout` (30s), `WriteTimeout` (30s) and `IdleTimeout` (120s). An API
+call whose body takes longer than 30 seconds to arrive, or whose answer takes
+longer than 30 seconds to be read, is cut; an idle keep-alive connection is
+closed after two minutes. Sockets are not affected: the server replaces both
+deadlines on the hijacked connection before it reads or writes a frame, and
+they keep `JOAJU_PONG_TIMEOUT` and `JOAJU_WRITE_TIMEOUT`.

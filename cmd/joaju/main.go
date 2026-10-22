@@ -84,25 +84,15 @@ func run() error {
 		maxBody = joaju.DefaultMaxBodySize
 	}
 
-	httpServer := &http.Server{
-		Handler: frontDoor{
-			appKey:  cfg.AppKey,
-			secret:  []byte(cfg.AppSecret),
-			tenant:  cfg.Tenant,
-			maxBody: maxBody,
-			now:     time.Now,
-			log:     log,
-			next:    server,
-		},
-		// The one timeout set here. ReadTimeout and WriteTimeout would be a
-		// second answer to a question [joaju.ServerConfig] already answers with
-		// PongTimeout and WriteTimeout, and they would answer it for a
-		// connection net/http no longer owns.
-		ReadHeaderTimeout: defaultReadHeaderTimeout,
-		// net/http's own errors -- a bad TLS handshake, a panic in a handler --
-		// go where every other line goes rather than to the standard logger.
-		ErrorLog: slog.NewLogLogger(log.Handler(), slog.LevelWarn),
-	}
+	httpServer := newHTTPServer(frontDoor{
+		appKey:  cfg.AppKey,
+		secret:  []byte(cfg.AppSecret),
+		tenant:  cfg.Tenant,
+		maxBody: maxBody,
+		now:     time.Now,
+		log:     log,
+		next:    server,
+	}, log)
 
 	// The listener is opened before anything is announced, so the line below is
 	// true when it is written: a port already in use is an error and not a
@@ -141,6 +131,33 @@ func run() error {
 	stop()
 
 	return shutdown(server, httpServer, log, cfg.ShutdownTimeout)
+}
+
+// newHTTPServer is the net/http server in front of the handler, with every
+// timeout a server facing anonymous clients needs.
+//
+// Without them a client that opens a connection and sends its body a byte a
+// minute, or never reads the answer, or keeps an idle connection open, holds a
+// goroutine and a file descriptor for as long as it likes, and enough of them
+// stop the process answering anybody.
+//
+// They do not reach a socket. The deadlines net/http sets are left on the
+// connection when the upgrade hijacks it, and the server replaces both before
+// they matter: the read deadline with PongTimeout before the first frame is
+// read, the write deadline with WriteTimeout before every frame it writes. So
+// these bound the HTTP request -- the API call, and the upgrade request up to
+// its 101 -- and the socket keeps the limits [joaju.ServerConfig] gives it.
+func newHTTPServer(handler http.Handler, log *slog.Logger) *http.Server {
+	return &http.Server{
+		Handler:           handler,
+		ReadHeaderTimeout: defaultReadHeaderTimeout,
+		ReadTimeout:       defaultReadTimeout,
+		WriteTimeout:      defaultWriteTimeout,
+		IdleTimeout:       defaultIdleTimeout,
+		// net/http's own errors -- a bad TLS handshake, a panic in a handler --
+		// go where every other line goes rather than to the standard logger.
+		ErrorLog: slog.NewLogLogger(log.Handler(), slog.LevelWarn),
+	}
 }
 
 // newServer assembles the server out of the configuration.
