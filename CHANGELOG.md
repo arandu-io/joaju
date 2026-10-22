@@ -1,5 +1,9 @@
 # Release Notes
 
+## [v0.8.0](https://github.com/arandu-io/joaju/compare/redis/v0.1.4...v0.8.0) - 2026-10-22
+
+**Full Changelog**: https://github.com/arandu-io/joaju/compare/redis/v0.1.4...v0.8.0
+
 ## [v0.7.4](https://github.com/arandu-io/joaju/compare/redis/v0.1.3...v0.7.4) - 2026-10-10
 
 **Full Changelog**: https://github.com/arandu-io/joaju/compare/redis/v0.1.3...v0.7.4
