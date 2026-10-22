@@ -52,6 +52,15 @@ func (e2eConnect) Can(context.Context, auth.Subject, auth.Action, joaju.Handshak
 	return nil
 }
 
+// e2eOperate admits every API call, for the reason e2eConnect admits every
+// handshake: the harness publishes and terminates as the application would, and
+// who may do so has its own tests in tests/Feature.
+type e2eOperate struct{}
+
+func (e2eOperate) Can(context.Context, auth.Subject, auth.Action, joaju.Operation) error {
+	return nil
+}
+
 // e2eSubscribe is the application's decision about one channel, written the way
 // an application's would be.
 //
@@ -245,6 +254,7 @@ func newE2EServer(t *testing.T, activityTimeout time.Duration, swallowPing bool,
 		AppKey:    e2eAppKey,
 		Broker:    broker,
 		Connect:   e2eConnect{},
+		Operate:   e2eOperate{},
 		Subscribe: subscribe,
 		Protocol:  protocol,
 		// Every scenario causes a refusal on purpose. The suite's output is not

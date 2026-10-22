@@ -58,6 +58,7 @@ server, err := joaju.NewServer(joaju.ServerConfig{
 	AppKey:    cfg.AppKey,
 	Broker:    broker,
 	Connect:   connectPolicy{},
+	Operate:   operationPolicy{}, // optional: nil refuses every API route
 	Subscribe: subscribe,
 	Protocol: pusher.NewPusher(broker, subscribe, pusher.PusherConfig{
 		ActivityTimeout: 30 * time.Second,

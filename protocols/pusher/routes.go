@@ -25,22 +25,22 @@ import (
 //
 // # The authorization shape, which every route follows
 //
-//	[joaju.ConnectPolicy]       once per request  may this subject be here at all
+//	[joaju.OperationPolicy]     once per request  may this subject operate the server
 //	[joaju.SubscriptionPolicy]  once per channel  may this subject reach this channel
 //
-// Both run here and not only on the socket, because listing channels, counting
-// subscribers and reading a presence channel's members are reads of who is
-// talking to whom, and there is no exception for reads. A dashboard that lists
-// channels without a policy is a tenant boundary that holds everywhere except
-// the dashboard.
+// Both run here, because publishing, listing channels, counting subscribers and
+// reading a presence channel's members are acts on who is talking to whom, and
+// there is no exception for reads. A dashboard that lists channels without a
+// policy is a tenant boundary that holds everywhere except the dashboard.
 //
-// A [joaju.Handshake] is what the ConnectPolicy is asked about here as well,
-// with Socket empty -- an API caller is asking the same question a browser
-// asks, minus the socket it wants opened. Inventing a third auth.Action for it
-// would mean a third policy an application has to remember to write, and the
-// question it would answer is the one Connect already answers.
+// The first is asked about [joaju.Operate] and an [joaju.Operation] naming the
+// route, and never about [joaju.Connect]: whoever may hold a socket is not, by
+// that alone, somebody who may publish in the server's voice or close another
+// subject's sockets. A server built without an OperationPolicy hands this
+// package a nil one, and every route below refuses with 403 -- the API is
+// closed until an application says who may operate it.
 //
-// The Connect Grant is also what a [joaju.ChannelName] is built from here,
+// The Operate Grant is also what a [joaju.ChannelName] is built from here,
 // because a name needs a tenant and a tenant comes off a Grant. The channel a
 // caller named in the path is never trusted for that: it supplies the name
 // after the tenant, and nothing else.
@@ -56,6 +56,27 @@ import (
 // standalone socket server has to, having no session to read, but a mounted one
 // has already been through the host application's front door, and a second
 // credential would be a second way to prove who is calling.
+
+// The patterns of the HTTP API, method included, as [joaju.Operation.Route]
+// carries them to an [joaju.OperationPolicy]. A policy compares against these
+// rather than spelling a pattern of its own, so a route renamed here is a
+// policy that stops compiling instead of one that silently stops matching.
+const (
+	// RouteEvents publishes one event.
+	RouteEvents = "POST /apps/{appId}/events"
+	// RouteBatchEvents publishes many.
+	RouteBatchEvents = "POST /apps/{appId}/batch_events"
+	// RouteConnections counts the tenant's sockets.
+	RouteConnections = "GET /apps/{appId}/connections"
+	// RouteChannels lists the tenant's channels.
+	RouteChannels = "GET /apps/{appId}/channels"
+	// RouteChannel answers about one channel.
+	RouteChannel = "GET /apps/{appId}/channels/{channel}"
+	// RouteChannelUsers lists the members of one presence channel.
+	RouteChannelUsers = "GET /apps/{appId}/channels/{channel}/users"
+	// RouteTerminateConnections closes every socket one subject holds.
+	RouteTerminateConnections = "POST /apps/{appId}/users/{userId}/terminate_connections"
+)
 
 // routes is the Pusher HTTP API, built out of everything the server lets a
 // route reach.
@@ -80,13 +101,13 @@ func (p *pusher) Routes(api joaju.API) http.Handler {
 // it would otherwise have sent.
 func (api routes) mux() *http.ServeMux {
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /apps/{appId}/events", api.events)
-	mux.HandleFunc("POST /apps/{appId}/batch_events", api.batchEvents)
-	mux.HandleFunc("GET /apps/{appId}/connections", api.connections)
-	mux.HandleFunc("GET /apps/{appId}/channels", api.channels)
-	mux.HandleFunc("GET /apps/{appId}/channels/{channel}", api.channel)
-	mux.HandleFunc("GET /apps/{appId}/channels/{channel}/users", api.channelUsers)
-	mux.HandleFunc("POST /apps/{appId}/users/{userId}/terminate_connections", api.terminate)
+	mux.HandleFunc(RouteEvents, api.events)
+	mux.HandleFunc(RouteBatchEvents, api.batchEvents)
+	mux.HandleFunc(RouteConnections, api.connections)
+	mux.HandleFunc(RouteChannels, api.channels)
+	mux.HandleFunc(RouteChannel, api.channel)
+	mux.HandleFunc(RouteChannelUsers, api.channelUsers)
+	mux.HandleFunc(RouteTerminateConnections, api.terminate)
 	mux.HandleFunc("GET /up", up)
 
 	return mux
@@ -109,7 +130,7 @@ type publishRequest struct {
 
 // events is POST /apps/{appId}/events: publish one event.
 func (api routes) events(w http.ResponseWriter, r *http.Request) {
-	grant, ok := api.enter(w, r)
+	grant, ok := api.enter(w, r, RouteEvents)
 	if !ok {
 		return
 	}
@@ -129,7 +150,7 @@ func (api routes) events(w http.ResponseWriter, r *http.Request) {
 
 // batchEvents is POST /apps/{appId}/batch_events: publish many.
 func (api routes) batchEvents(w http.ResponseWriter, r *http.Request) {
-	grant, ok := api.enter(w, r)
+	grant, ok := api.enter(w, r, RouteBatchEvents)
 	if !ok {
 		return
 	}
@@ -231,7 +252,7 @@ func (api routes) publish(ctx context.Context, connected auth.Grant, body publis
 
 // connections is GET /apps/{appId}/connections: how many sockets.
 func (api routes) connections(w http.ResponseWriter, r *http.Request) {
-	grant, ok := api.enter(w, r)
+	grant, ok := api.enter(w, r, RouteConnections)
 	if !ok {
 		return
 	}
@@ -252,7 +273,7 @@ func (api routes) connections(w http.ResponseWriter, r *http.Request) {
 
 // channels is GET /apps/{appId}/channels: the channel list.
 func (api routes) channels(w http.ResponseWriter, r *http.Request) {
-	connected, ok := api.enter(w, r)
+	connected, ok := api.enter(w, r, RouteChannels)
 	if !ok {
 		return
 	}
@@ -310,7 +331,7 @@ func (api routes) channels(w http.ResponseWriter, r *http.Request) {
 
 // channel is GET /apps/{appId}/channels/{channel}: one channel.
 func (api routes) channel(w http.ResponseWriter, r *http.Request) {
-	held, grant, ok := api.find(w, r)
+	held, grant, ok := api.find(w, r, RouteChannel)
 	if !ok {
 		return
 	}
@@ -336,7 +357,7 @@ func (api routes) channel(w http.ResponseWriter, r *http.Request) {
 // channelUsers is GET /apps/{appId}/channels/{channel}/users: the members of a
 // presence channel.
 func (api routes) channelUsers(w http.ResponseWriter, r *http.Request) {
-	held, grant, ok := api.find(w, r)
+	held, grant, ok := api.find(w, r, RouteChannelUsers)
 	if !ok {
 		return
 	}
@@ -373,7 +394,7 @@ func (api routes) channelUsers(w http.ResponseWriter, r *http.Request) {
 
 // terminate is POST /apps/{appId}/users/{userId}/terminate_connections.
 func (api routes) terminate(w http.ResponseWriter, r *http.Request) {
-	grant, ok := api.enter(w, r)
+	grant, ok := api.enter(w, r, RouteTerminateConnections)
 	if !ok {
 		return
 	}
@@ -403,9 +424,13 @@ func up(w http.ResponseWriter, _ *http.Request) {
 }
 
 // enter is the first half of every route here: the app has to be this one, the
-// request has to carry a subject, and the [joaju.ConnectPolicy] has to allow
-// it.
-func (api routes) enter(w http.ResponseWriter, r *http.Request) (auth.Grant, bool) {
+// request has to carry a subject, and the [joaju.OperationPolicy] has to allow
+// this subject to call this route.
+//
+// route is the pattern the handler was registered under, passed by the handler
+// rather than read back off the request, so the policy is told the route the
+// code is about to run and not whatever a wrapping mux recorded.
+func (api routes) enter(w http.ResponseWriter, r *http.Request, route string) (auth.Grant, bool) {
 	if r.PathValue("appId") != api.AppID {
 		api.refuse(w, r, http.StatusNotFound, "Unknown app.", nil)
 
@@ -419,12 +444,19 @@ func (api routes) enter(w http.ResponseWriter, r *http.Request) (auth.Grant, boo
 		return auth.Grant{}, false
 	}
 
-	// Socket is empty: an API caller is asking whether it may act on this
-	// server, which is the question [joaju.Connect] answers, and it is not
-	// asking for a socket to be opened. Origin is carried through because a
-	// browser calling the API sends one and the policy that judges it is the
-	// same one.
-	grant, err := auth.Authorize(r.Context(), api.Connect, subject, joaju.Connect, joaju.Handshake{
+	// No policy is a refusal, said as one. The server was built without
+	// anybody deciding who may operate it, and the answer to an undecided
+	// question about publishing in the server's voice is no.
+	if api.Operate == nil {
+		api.fail(w, r, fmt.Errorf("%w: this server was built without an OperationPolicy, so nobody may call %s", auth.ErrForbidden, route))
+
+		return auth.Grant{}, false
+	}
+
+	// Origin is carried through because a browser calling the API sends one,
+	// and a policy that wants to refuse cross-site callers needs to see it.
+	grant, err := auth.Authorize(r.Context(), api.Operate, subject, joaju.Operate, joaju.Operation{
+		Route:  route,
 		Origin: r.Header.Get("Origin"),
 	})
 	if err != nil {
@@ -443,8 +475,8 @@ func (api routes) enter(w http.ResponseWriter, r *http.Request) (auth.Grant, boo
 // The Grant comes back with the channel because both routes have a second half
 // of their own -- [joaju.Registry.Fleet], which reads the tenant off it and off
 // nothing that arrived with the request.
-func (api routes) find(w http.ResponseWriter, r *http.Request) (joaju.Channel, auth.Grant, bool) {
-	connected, ok := api.enter(w, r)
+func (api routes) find(w http.ResponseWriter, r *http.Request, route string) (joaju.Channel, auth.Grant, bool) {
+	connected, ok := api.enter(w, r, route)
 	if !ok {
 		return nil, auth.Grant{}, false
 	}

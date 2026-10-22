@@ -153,7 +153,7 @@ type Protocol interface {
 // them: what this process holds, what the other instances hold, and the one way
 // to close what this process holds.
 //
-// Every question takes a Grant a [ConnectPolicy] or a [SubscriptionPolicy]
+// Every question takes a Grant an [OperationPolicy] or a [SubscriptionPolicy]
 // issued, and the tenant on it is the only filter -- because it is the only one
 // that did not arrive with the request. There is nothing here that opens a
 // socket, nothing that closes one outside the Grant's tenant, and nothing that
@@ -163,11 +163,12 @@ type Protocol interface {
 // [Server] is what implements it.
 type Registry interface {
 	// Connections is how many sockets this process holds for the Grant's
-	// tenant.
+	// tenant. The Grant is one an [OperationPolicy] issued for [Operate].
 	Connections(g auth.Grant) (int, error)
 
 	// Terminate closes every socket the Grant's tenant holds for one subject,
-	// and answers how many it closed.
+	// and answers how many it closed. The Grant is one an [OperationPolicy]
+	// issued for [Operate].
 	Terminate(ctx context.Context, g auth.Grant, subject string) (int, error)
 
 	// Fleet is what the OTHER instances hold for the Grant's tenant. channel is
@@ -190,7 +191,7 @@ var _ Registry = (*Server)(nil)
 // What is NOT here is the shape of it: nothing writes to the connection
 // registry, and nothing reads one without a Grant. A [Protocol] that wanted to
 // count another tenant's sockets would have to be handed a Grant of that
-// tenant, and a [ConnectPolicy] is what issues one.
+// tenant, and an [OperationPolicy] is what issues one.
 //
 // A [Protocol] is handed one and does not build one.
 type API struct {
@@ -202,10 +203,16 @@ type API struct {
 	// without a Grant.
 	Broker Broker
 
-	// Connect decides whether a subject may act on this server at all. It is
-	// the policy the socket route runs, asked the same question with no socket
-	// on it -- an API caller wants no socket opened.
-	Connect ConnectPolicy
+	// Operate decides whether a subject may call a route at all, and every
+	// route that reads or writes state asks it first, about [Operate]. It is
+	// nil when the server was configured without one, and a route then refuses
+	// with 403: an application that never decided who may operate the server
+	// has decided nobody may.
+	//
+	// The socket's [ConnectPolicy] is deliberately not here. It answers for
+	// browsers opening sockets, and a route asking it would hand the API to
+	// everybody who may connect.
+	Operate OperationPolicy
 
 	// Subscribe decides whether a subject may reach one channel. It runs once
 	// per channel a route touches, listing and counting included: reading who
@@ -245,9 +252,19 @@ type ServerConfig struct {
 	// without a Grant.
 	Broker Broker
 
-	// Connect decides whether a subject may be on this server at all. It runs
-	// on the socket route and on every API route, before anything else.
+	// Connect decides whether a subject may open a socket. It runs on the
+	// socket route, before the upgrade, and on nothing else.
 	Connect ConnectPolicy
+
+	// Operate decides whether a subject may call the HTTP API: publish, count,
+	// list, read members, terminate. It runs on every API route, before
+	// anything else, and the Grant it issues is the one the route reaches the
+	// registry with.
+	//
+	// It is optional, and nil is a refusal rather than a default that admits
+	// somebody: every API route that reads or writes state answers 403. A
+	// deployment that only serves sockets leaves it out and loses nothing.
+	Operate OperationPolicy
 
 	// Subscribe decides whether a subject may reach one channel. It runs once
 	// per channel touched, on every route that touches one.
@@ -359,6 +376,7 @@ type Server struct {
 
 	broker    Broker
 	connect   ConnectPolicy
+	operate   OperationPolicy
 	subscribe SubscriptionPolicy
 	protocol  Protocol
 	log       *slog.Logger
@@ -449,6 +467,7 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		appKey:         cfg.AppKey,
 		broker:         cfg.Broker,
 		connect:        cfg.Connect,
+		operate:        cfg.Operate,
 		subscribe:      cfg.Subscribe,
 		protocol:       cfg.Protocol,
 		log:            cfg.Log,
@@ -549,7 +568,7 @@ func (s *Server) api() API {
 	return API{
 		AppID:       s.appID,
 		Broker:      s.broker,
-		Connect:     s.connect,
+		Operate:     s.operate,
 		Subscribe:   s.subscribe,
 		Registry:    s,
 		MaxBodySize: s.maxBodySize,
@@ -564,8 +583,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) { s.mux.Serve
 //
 // It takes a Grant for the reason [Broker.All] does: a count of who is
 // connected is a read, and a count that spans tenants tells one customer how
-// many of another's people are online. The Grant has to be one a
-// [ConnectPolicy] issued -- auth.Grant.Check is what says so -- and the tenant
+// many of another's people are online. The Grant has to be one an
+// [OperationPolicy] issued -- auth.Grant.Check is what says so -- and the tenant
 // it carries is the only filter, because it is the only one that did not come
 // in with the request.
 func (s *Server) Connections(g auth.Grant) (int, error) {
@@ -625,10 +644,14 @@ func (s *Server) Terminate(ctx context.Context, g auth.Grant, subject string) (i
 	return len(doomed), nil
 }
 
-// registryTenant is the one check the two registry reads share: a Grant a
-// [ConnectPolicy] issued, carrying a tenant.
+// registryTenant is the one check the two registry reads share: a Grant an
+// [OperationPolicy] issued, carrying a tenant.
+//
+// A Grant issued for [Connect] is refused. It proves somebody may hold a
+// socket, and holding a socket is not permission to count everybody else's or
+// to close them.
 func registryTenant(g auth.Grant) (string, error) {
-	if err := g.Check(Connect); err != nil {
+	if err := g.Check(Operate); err != nil {
 		return "", fmt.Errorf("joaju: %w", err)
 	}
 	tenant := auth.Tenant(g)

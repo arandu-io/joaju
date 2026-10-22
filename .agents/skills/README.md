@@ -19,7 +19,7 @@ server writes the transport it stands on. The skills are split along that line.
 | skill | when it fires |
 | --- | --- |
 | `joaju-server` | mounting the server in an application, or running the process, and publishing an event to whoever is listening |
-| `joaju-channel-policy` | deciding who may hold a socket and who may hear a channel — the two Grants, and the reads that have no exemption |
+| `joaju-channel-policy` | deciding who may hold a socket, who may hear a channel and who may call the HTTP API — the three Grants, and the reads that have no exemption |
 | `joaju-browser-client` | the page half: serving the script, connecting, subscribing, and the endpoint that authorizes a private channel |
 | `joaju-transport` | changing anything under `ws/` — frames, the handshake, close codes, UTF-8, conformance |
 

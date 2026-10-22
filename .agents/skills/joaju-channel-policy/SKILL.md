@@ -1,10 +1,10 @@
 ---
 name: joaju-channel-policy
-description: Authorization in the joaju WebSocket server — the two policies that decide who holds a socket and who hears a channel. Use when writing or changing a ConnectPolicy or a SubscriptionPolicy, when something asks for an auth.Grant, when a subscription is refused or is being allowed too easily, when a channel name will not build, or when the request mentions "who can subscribe", "private channel", "presence channel", "channel authorization", "authorize a socket", "subscription signature", "broadcasting/auth", "multi-tenant sockets", "tenant isolation", "ErrWrongTenant", "ErrNoGrant", "impersonate a member", or "let the reads through". Also use when tempted to skip the policy for a public channel, a channel list, a subscriber count or a presence member list — subscribing is a read, and there is no exception for reads.
+description: Authorization in the joaju WebSocket server — the policies that decide who holds a socket, who hears a channel and who may call the HTTP API. Use when writing or changing a ConnectPolicy, a SubscriptionPolicy or an OperationPolicy, when something asks for an auth.Grant, when a subscription is refused or is being allowed too easily, when a channel name will not build, or when the request mentions "who can subscribe", "private channel", "presence channel", "channel authorization", "authorize a socket", "subscription signature", "broadcasting/auth", "multi-tenant sockets", "tenant isolation", "ErrWrongTenant", "ErrNoGrant", "impersonate a member", or "let the reads through". Also use when tempted to skip the policy for a public channel, a channel list, a subscriber count or a presence member list — subscribing is a read, and there is no exception for reads.
 license: MIT
 ---
 
-# The two decisions, and why there is no third
+# Three decisions, and why none of them is another asked twice
 
 Every path to a channel in this server goes through an `auth.Grant`, and a Grant
 is only ever produced by a Policy. `Connection` cannot be built without one and
@@ -14,9 +14,10 @@ without asking has nothing to pass.
 ```
 Connect                    holding a socket at all   -> ConnectPolicy
 broadcasting.ChannelJoin   hearing one channel       -> SubscriptionPolicy
+Operate                    calling the HTTP API      -> OperationPolicy
 ```
 
-They are two and not one because they answer different questions. Issuing one
+The first two are two and not one because they answer different questions. Issuing one
 Grant for both would mean the per-channel policy never runs — one constant
 undoing every subscription decision.
 
@@ -25,9 +26,10 @@ one. Subscribing is a read, and there is no exception for reads.
 
 ## The procedure
 
-**1. Write the ConnectPolicy.** It answers two callers, told apart by
-`Handshake.Socket`: a browser upgrading has one, an API caller has none, because
-an API caller wants no socket opened.
+**1. Write the ConnectPolicy.** It answers the socket route and nothing else:
+every `Handshake` it sees is a browser upgrading, and `Handshake.Socket` is
+always the id already minted for it. The HTTP API asks a policy of its own --
+step 4.
 
 ```go
 func (p connectPolicy) Can(_ context.Context, s auth.Subject, a auth.Action, h joaju.Handshake) error {
@@ -78,6 +80,28 @@ func (p subscriptionPolicy) Can(_ context.Context, s auth.Subject, a auth.Action
 A Grant issued for `Connect` is not a Grant to listen, which is why the tenant
 is compared again here: a subject that reached this policy by another path is
 still refused. `cmd/joaju/policy.go` is the worked example.
+
+**4. Write the OperationPolicy, or leave it out.** `ServerConfig.Operate` decides
+who may call the HTTP API -- publish, count, list, read members, terminate --
+and it is asked about `joaju.Operate` and a `joaju.Operation` naming the route
+(`pusher.RouteEvents` and the rest). It is not the ConnectPolicy asked again:
+every signed-in user may usually hold a socket, and almost none of them may
+publish to a private channel in the server's voice or close somebody else's
+sockets. Nil is a refusal, so a deployment that only serves sockets leaves it
+out and every API route answers 403 —
+`TestServerRefusesTheAPIToAnOrdinarySubjectWhenNoOperationPolicyWasGiven`.
+
+```go
+func (p operationPolicy) Can(_ context.Context, s auth.Subject, a auth.Action, op joaju.Operation) error {
+	if a != joaju.Operate {
+		return fmt.Errorf("%s is not %s, which is the only action this policy answers", a, joaju.Operate)
+	}
+	if !s.HasRole(roleApplication) {
+		return fmt.Errorf("%s answers the application, and %q is not it", op.Route, s.ID)
+	}
+	return nil
+}
+```
 
 **4. Compare the offered member against the subject.** `Subscription.Member`
 came from the client. A policy that lets a subscriber name their own

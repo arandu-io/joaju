@@ -10,15 +10,12 @@ import (
 	"github.com/arandu-io/joaju"
 )
 
-// connectPolicy decides who may be on this process at all, and is the first of
-// the two decisions joaju makes.
+// connectPolicy decides who may open a socket on this process, and is the first
+// of the three decisions joaju makes.
 //
-// It answers two different callers, and [joaju.Handshake.Socket] is how they are
-// told apart -- an API route asks the same question with no socket to open, which
-// is [joaju.Server]'s own arrangement and not an invention here:
-//
-//	Socket set    a browser upgrading. The origin is checked.
-//	Socket empty  the application, having signed with the app secret.
+// It answers the socket route and nothing else -- the HTTP API asks
+// [operationPolicy] -- so every [joaju.Handshake] it sees is a browser
+// upgrading, with the socket id already minted.
 //
 // The origin list belongs here rather than in configuration read by the
 // transport, because refusing an origin is a decision about who may connect and
@@ -44,18 +41,6 @@ func (p connectPolicy) Can(_ context.Context, s auth.Subject, a auth.Action, h j
 		return fmt.Errorf("this process serves the tenant %q and the subject carries %q", p.tenant, s.Tenant)
 	}
 
-	if h.Socket == "" {
-		// An API route. What is being asked is whether this caller may act on
-		// this server, and the answer is the credential it arrived with: the
-		// signature was verified at the front door, and nothing else in this
-		// process mints the role it left behind.
-		if !s.HasRole(roleApplication) {
-			return fmt.Errorf("the API routes answer the application, and %q did not sign with the app secret", s.ID)
-		}
-
-		return nil
-	}
-
 	if len(p.origins) == 0 {
 		return nil
 	}
@@ -68,8 +53,37 @@ func (p connectPolicy) Can(_ context.Context, s auth.Subject, a auth.Action, h j
 	return fmt.Errorf("the origin %q is not one this server accepts sockets from", h.Origin)
 }
 
+// operationPolicy decides who may call the HTTP API, and the answer is the
+// application and nobody else.
+//
+// The credential is the one the request arrived with: [frontDoor] verified the
+// signature over the app secret and minted the role this reads, and nothing
+// else in this process mints it. A browser is the anonymous reader and never
+// carries it, so a socket client cannot publish, count, list or terminate
+// however it calls.
+type operationPolicy struct {
+	// tenant is the one this process serves, checked again for the reason
+	// [connectPolicy] checks it.
+	tenant string
+}
+
+// Can decides one API call.
+func (p operationPolicy) Can(_ context.Context, s auth.Subject, a auth.Action, op joaju.Operation) error {
+	if a != joaju.Operate {
+		return fmt.Errorf("%s is not %s, which is the only action this policy answers", a, joaju.Operate)
+	}
+	if s.Tenant != p.tenant {
+		return fmt.Errorf("this process serves the tenant %q and the subject carries %q", p.tenant, s.Tenant)
+	}
+	if !s.HasRole(roleApplication) {
+		return fmt.Errorf("%s answers the application, and %q did not sign with the app secret", op.Route, s.ID)
+	}
+
+	return nil
+}
+
 // subscriptionPolicy decides who may hear one channel, and is the second of the
-// two decisions. It runs for every channel, on every subscription, and on every
+// three decisions. It runs for every channel, on every subscription, and on every
 // API route that names one, because subscribing is a read and there is no
 // exception for reads.
 //

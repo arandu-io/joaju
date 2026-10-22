@@ -85,6 +85,15 @@ func (r *routeTestRegistry) closed() []string {
 	return append([]string(nil), r.terminated...)
 }
 
+// routeTestOperatePolicy allows every call, so that what a test here looks at
+// is what the route did once it was allowed. Whether it is allowed is the
+// OperationPolicy's, and the tests of the refusal are their own.
+type routeTestOperatePolicy struct{}
+
+func (routeTestOperatePolicy) Can(context.Context, auth.Subject, auth.Action, joaju.Operation) error {
+	return nil
+}
+
 // The application every server in this file is.
 const routeTestAppID = "app-1"
 
@@ -93,7 +102,7 @@ func routeTestAPI(broker joaju.Broker, registry joaju.Registry) joaju.API {
 	return joaju.API{
 		AppID:       routeTestAppID,
 		Broker:      broker,
-		Connect:     channelTestConnectPolicy{},
+		Operate:     routeTestOperatePolicy{},
 		Subscribe:   channelTestJoinPolicy{},
 		Registry:    registry,
 		MaxBodySize: joaju.DefaultMaxBodySize,

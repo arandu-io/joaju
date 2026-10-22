@@ -1005,7 +1005,7 @@ func (r *Relay) attend(ctx context.Context, topic, operation string, handle func
 // cannot be one: the subject is on the instance that took the request, and a
 // subject that travelled over the bus would be authentication coming off the
 // wire. The decision that let the question be asked at all was made there, by
-// [ConnectPolicy] and [SubscriptionPolicy], before the route published
+// [OperationPolicy] and [SubscriptionPolicy], before the route published
 // anything.
 func (r *Relay) answer(payload string) {
 	// An arriving question is proof the bus is reachable, for the reason
@@ -1143,7 +1143,7 @@ func (r *Relay) collect(payload string) {
 // is read off it and off nothing in the request. Nothing else is read
 // off it: which action it was issued for is the route's business, and the four
 // metrics routes do not agree on one -- the count of sockets is authorized by
-// the [ConnectPolicy] and the three channel routes by the
+// the [OperationPolicy] and the three channel routes by the
 // [SubscriptionPolicy]. What this checks is that a Grant carrying no tenant
 // asks nothing, which is what the zero Grant is.
 //

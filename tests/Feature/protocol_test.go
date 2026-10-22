@@ -124,6 +124,14 @@ func (protocolConnectPolicy) Can(context.Context, auth.Subject, auth.Action, joa
 	return nil
 }
 
+// protocolOperatePolicy allows every API call, for the reason the connect
+// policy above allows every socket: what is tested here comes after it.
+type protocolOperatePolicy struct{}
+
+func (protocolOperatePolicy) Can(context.Context, auth.Subject, auth.Action, joaju.Operation) error {
+	return nil
+}
+
 // protocolSubject is the subject hesape/auth's Authenticate middleware would
 // have put on the context. Nothing here authenticates: it reads what the
 // framework's front door left there.
@@ -178,6 +186,7 @@ func newProtocolFixture(t *testing.T, cfg pusher.PusherConfig, over ...joaju.Bro
 		AppKey:    protocolAppKey,
 		Broker:    broker,
 		Connect:   protocolConnectPolicy{},
+		Operate:   protocolOperatePolicy{},
 		Subscribe: policy,
 		Protocol:  pusher.NewPusher(broker, policy, cfg),
 		Observer:  observer,

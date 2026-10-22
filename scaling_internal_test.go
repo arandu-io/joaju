@@ -882,7 +882,7 @@ func (i *fleetTestInstance) ask(t *testing.T, tenant, channel string) FleetTally
 func (i *fleetTestInstance) held(t *testing.T, tenant string) int {
 	t.Helper()
 
-	open, err := i.server.Connections(relayTestGrant(t, tenant, Connect))
+	open, err := i.server.Connections(relayTestGrant(t, tenant, Operate))
 	if err != nil {
 		t.Fatalf("counting the sockets of %s: %v", tenant, err)
 	}

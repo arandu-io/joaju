@@ -22,6 +22,20 @@ import (
 // every subscription decision.
 const Connect auth.Action = "joaju.connect"
 
+// Operate is the auth.Action the Grant behind a call to the HTTP API is issued
+// for: publishing an event, counting or listing what is open, reading a
+// presence channel's members, terminating a subject's sockets.
+//
+// It is a decision of its own and not [Connect] asked again, because the two
+// are answered for different people. Every signed-in user of a tenant may
+// usually hold a socket; almost none of them may publish to a private channel
+// in the server's voice, or close somebody else's sockets. A policy written
+// for the first question allows the second by accident, and the default it
+// would fall back to -- whoever may connect may operate -- is the wrong one to
+// fall back to. So the API asks an [OperationPolicy] about this action, and a
+// server configured without one answers every API route with a refusal.
+const Operate auth.Action = "joaju.operate"
+
 // The prefixes a Pusher cache channel carries.
 //
 // broadcasting.PrivateChannelPrefix and broadcasting.PresenceChannelPrefix
@@ -575,8 +589,16 @@ type Event struct {
 // a decision about who may connect, and this repository has one place where
 // those are made. An allowed-origins list in configuration answers the same
 // question; a policy answers it beside every other one.
+//
+// A ConnectPolicy is asked about a Handshake by the socket route and by nothing
+// else. The HTTP API asks an [OperationPolicy] about an [Operation] instead, so
+// a policy over this type answers for browsers opening sockets and is never
+// read as permission to call the API.
 type Handshake struct {
-	// Socket is the id minted for this client.
+	// Socket is the id minted for this client. It is always set: the id is
+	// minted before the policy is asked, from crypto/rand, so a policy may log
+	// it or bind evidence to it. It is never empty, and a policy has no reason
+	// to branch on its being empty.
 	Socket SocketID
 	// Origin is the Origin header of the upgrade request, verbatim. It is what
 	// the browser claims, so it is evidence for a policy and never a tenant.
@@ -642,6 +664,34 @@ type Subscription struct {
 // in this ecosystem, and it is auth.Policy. The alias exists so the resource
 // type is named at the point the decision is described.
 type ConnectPolicy = auth.Policy[Handshake]
+
+// Operation is what an [OperationPolicy] decides about: one call to an HTTP
+// route of the [Protocol].
+//
+// The route is named so that a policy can allow one thing and refuse another
+// -- publishing to a channel and terminating somebody's sockets are both
+// operations, and they are rarely allowed to the same people. The channel a
+// call names is not here: reaching a channel is the [SubscriptionPolicy]'s
+// decision, asked separately for every channel the call touches.
+type Operation struct {
+	// Route is the pattern the call matched, method included, exactly as the
+	// [Protocol] registered it -- "POST /apps/{appId}/events". A protocol
+	// documents its own patterns.
+	Route string
+	// Origin is the Origin header of the request, verbatim, and is empty for a
+	// caller that is not a browser. It is evidence for a policy and never a
+	// tenant.
+	Origin string
+}
+
+// OperationPolicy decides whether a subject may call the HTTP API. Its Grant is
+// issued for [Operate].
+//
+// It is optional in [ServerConfig] and nil is a refusal: a server without one
+// answers every API route that reads or writes state with 403, and the socket
+// route and the health check are unaffected. See [Operate] for why it is not
+// the [ConnectPolicy].
+type OperationPolicy = auth.Policy[Operation]
 
 // SubscriptionPolicy decides whether a client may listen on a channel. Its
 // Grant is issued for broadcasting.ChannelJoin, which hesape/broadcasting

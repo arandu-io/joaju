@@ -8,6 +8,7 @@ import (
 	"github.com/arandu-io/hesape/auth"
 	"github.com/arandu-io/hesape/broadcasting"
 	"github.com/arandu-io/joaju"
+	"github.com/arandu-io/joaju/protocols/pusher"
 )
 
 // browser is the subject the front door mints for a socket: hesape's declared
@@ -65,26 +66,61 @@ const (
 // for byte as a client would put it in the frame.
 const presenceChannelData = `{"user_id":10,"user_info":{"name":"Mr. Pusher"}}`
 
-func TestConnectPolicyAnswersTheSocketRouteAndTheAPIRoute(t *testing.T) {
+func TestConnectPolicyAnswersTheSocketRouteOnly(t *testing.T) {
 	t.Parallel()
 
 	policy := connectPolicy{tenant: testTenant}
 
-	// A socket carries the id minted for it; an API caller asks the same
-	// question with none, which is how the two are told apart.
 	if _, err := auth.Authorize(context.Background(), policy, browser(testTenant), joaju.Connect,
 		joaju.Handshake{Socket: "1.1", Origin: "https://app.example.com"}); err != nil {
 		t.Errorf("a browser was refused with no origin list configured: %v", err)
 	}
-	if _, err := auth.Authorize(context.Background(), policy, application(testTenant), joaju.Connect,
-		joaju.Handshake{}); err != nil {
-		t.Errorf("the application was refused on an API route: %v", err)
+	// The API is not this policy's question any more, so being asked about it
+	// is being asked about an action it does not answer.
+	if _, err := auth.Authorize(context.Background(), policy, application(testTenant), joaju.Operate,
+		joaju.Handshake{Socket: "1.1"}); !errors.Is(err, auth.ErrForbidden) {
+		t.Errorf("error = %v, want auth.ErrForbidden: the connect policy answered for the API", err)
 	}
-	// A caller that did not sign has no business on the API routes, whatever
-	// tenant it carries.
-	if _, err := auth.Authorize(context.Background(), policy, browser(testTenant), joaju.Connect,
-		joaju.Handshake{}); !errors.Is(err, auth.ErrForbidden) {
-		t.Errorf("error = %v, want auth.ErrForbidden: an unsigned caller reached an API route", err)
+}
+
+func TestOperationPolicyAnswersTheApplicationAndNobodyElse(t *testing.T) {
+	t.Parallel()
+
+	policy := operationPolicy{tenant: testTenant}
+
+	for _, route := range []string{
+		pusher.RouteEvents, pusher.RouteBatchEvents, pusher.RouteConnections, pusher.RouteChannels,
+		pusher.RouteChannel, pusher.RouteChannelUsers, pusher.RouteTerminateConnections,
+	} {
+		op := joaju.Operation{Route: route}
+		if _, err := auth.Authorize(context.Background(), policy, application(testTenant), joaju.Operate, op); err != nil {
+			t.Errorf("the application was refused %s: %v", route, err)
+		}
+		// A browser is the anonymous reader the front door mints for every
+		// unsigned request, and it never operates the server.
+		if _, err := auth.Authorize(context.Background(), policy, browser(testTenant), joaju.Operate, op); !errors.Is(err, auth.ErrForbidden) {
+			t.Errorf("error = %v, want auth.ErrForbidden: an unsigned caller reached %s", err, route)
+		}
+		// Nor does a signed-in person who is not the application, whatever
+		// tenant they carry.
+		person := auth.Subject{ID: "user-42", Tenant: testTenant}
+		if _, err := auth.Authorize(context.Background(), policy, person, joaju.Operate, op); !errors.Is(err, auth.ErrForbidden) {
+			t.Errorf("error = %v, want auth.ErrForbidden: an ordinary subject reached %s", err, route)
+		}
+	}
+}
+
+func TestOperationPolicyRefusesAnotherTenantAndAnotherAction(t *testing.T) {
+	t.Parallel()
+
+	policy := operationPolicy{tenant: testTenant}
+	op := joaju.Operation{Route: pusher.RouteEvents}
+
+	if _, err := auth.Authorize(context.Background(), policy, application("another"), joaju.Operate, op); !errors.Is(err, auth.ErrForbidden) {
+		t.Errorf("error = %v, want auth.ErrForbidden: another tenant's application was allowed", err)
+	}
+	if _, err := auth.Authorize(context.Background(), policy, application(testTenant), joaju.Connect, op); !errors.Is(err, auth.ErrForbidden) {
+		t.Errorf("error = %v, want auth.ErrForbidden: the policy issued a Grant for %s", err, joaju.Connect)
 	}
 }
 
@@ -128,13 +164,6 @@ func TestConnectPolicyRefusesAnOriginItWasNotGiven(t *testing.T) {
 			}
 		})
 	}
-
-	// The list narrows the socket route and says nothing about the API, whose
-	// credential is the signature and which carries no Origin at all.
-	if _, err := auth.Authorize(context.Background(), policy, application(testTenant), joaju.Connect,
-		joaju.Handshake{}); err != nil {
-		t.Errorf("an origin list refused a signed API call that carries no origin: %v", err)
-	}
 }
 
 func TestConnectPolicyAnswersOnlyItsOwnAction(t *testing.T) {
@@ -145,7 +174,7 @@ func TestConnectPolicyAnswersOnlyItsOwnAction(t *testing.T) {
 	policy := connectPolicy{tenant: testTenant}
 
 	if _, err := auth.Authorize(context.Background(), policy, application(testTenant),
-		broadcasting.ChannelJoin, joaju.Handshake{}); !errors.Is(err, auth.ErrForbidden) {
+		broadcasting.ChannelJoin, joaju.Handshake{Socket: "1.1"}); !errors.Is(err, auth.ErrForbidden) {
 		t.Fatalf("error = %v, want auth.ErrForbidden", err)
 	}
 }

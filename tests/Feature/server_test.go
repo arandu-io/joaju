@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"github.com/arandu-io/hesape/auth"
+	"github.com/arandu-io/hesape/broadcasting"
 	"github.com/arandu-io/joaju"
 	"github.com/arandu-io/joaju/protocols/pusher"
 	"github.com/arandu-io/joaju/tests"
@@ -71,6 +73,57 @@ func (p *serverSubscriptionPolicy) seen() []joaju.Subscription {
 	defer p.mu.Unlock()
 
 	return append([]joaju.Subscription(nil), p.asked...)
+}
+
+// serverOperatePolicy answers every API call the same way and records what it
+// was asked about, which is how a test asserts the route a policy was told
+// about is the route that ran.
+type serverOperatePolicy struct {
+	err error
+
+	mu    sync.Mutex
+	asked []joaju.Operation
+}
+
+func (p *serverOperatePolicy) Can(_ context.Context, _ auth.Subject, a auth.Action, op joaju.Operation) error {
+	if a != joaju.Operate {
+		return fmt.Errorf("no rule allows %s on the API", a)
+	}
+
+	p.mu.Lock()
+	p.asked = append(p.asked, op)
+	p.mu.Unlock()
+
+	return p.err
+}
+
+func (p *serverOperatePolicy) seen() []joaju.Operation {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	return append([]joaju.Operation(nil), p.asked...)
+}
+
+// serverRecordingConnectPolicy allows every handshake and counts how often it
+// was asked, so a test can say the API never asked it.
+type serverRecordingConnectPolicy struct {
+	mu    sync.Mutex
+	asked int
+}
+
+func (p *serverRecordingConnectPolicy) Can(context.Context, auth.Subject, auth.Action, joaju.Handshake) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.asked++
+
+	return nil
+}
+
+func (p *serverRecordingConnectPolicy) count() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	return p.asked
 }
 
 // serverChannel is a Channel that remembers what was broadcast on it.
@@ -312,6 +365,9 @@ func newServerFixture(t *testing.T, cfg joaju.ServerConfig, channels ...*serverC
 	}
 	if cfg.Connect == nil {
 		cfg.Connect = serverConnectPolicy{}
+	}
+	if cfg.Operate == nil {
+		cfg.Operate = &serverOperatePolicy{}
 	}
 	if cfg.Subscribe == nil {
 		cfg.Subscribe = f.subscribe
@@ -1429,5 +1485,161 @@ func TestServerLeavesASocketUnderItsRateLimitAlone(t *testing.T) {
 	var closed *ws.CloseError
 	if errors.As(err, &closed) {
 		t.Fatalf("a socket under its limit was closed: %v", closed)
+	}
+}
+
+// serverAnyUserConnectPolicy is the ConnectPolicy a mounted application would
+// naturally write: any signed-in subject may open a socket. It reads neither
+// the action nor the handshake, which is exactly what makes it dangerous to
+// ask about anything but a socket.
+type serverAnyUserConnectPolicy struct{}
+
+func (serverAnyUserConnectPolicy) Can(_ context.Context, s auth.Subject, _ auth.Action, _ joaju.Handshake) error {
+	if s.ID == "" {
+		return auth.ErrForbidden
+	}
+
+	return nil
+}
+
+// serverPublicOnlyPolicy lets anybody hear a public channel, and nothing else.
+type serverPublicOnlyPolicy struct{}
+
+func (serverPublicOnlyPolicy) Can(_ context.Context, _ auth.Subject, a auth.Action, sub joaju.Subscription) error {
+	if a != broadcasting.ChannelJoin {
+		return auth.ErrForbidden
+	}
+	if !sub.Channel.IsZero() && sub.Channel.Type().Guarded() {
+		return auth.ErrForbidden
+	}
+
+	return nil
+}
+
+// serverEveryRoute is one call to every API route that reads or writes state.
+var serverEveryRoute = []struct{ method, path, body string }{
+	{http.MethodPost, "/apps/" + serverAppID + "/events", `{"name":"forged","data":"{}","channel":"news"}`},
+	{http.MethodPost, "/apps/" + serverAppID + "/batch_events", `{"batch":[{"name":"forged","data":"{}","channel":"news"}]}`},
+	{http.MethodPost, "/apps/" + serverAppID + "/users/user-7/terminate_connections", `{}`},
+	{http.MethodGet, "/apps/" + serverAppID + "/connections", ``},
+	{http.MethodGet, "/apps/" + serverAppID + "/channels", ``},
+	{http.MethodGet, "/apps/" + serverAppID + "/channels/news", ``},
+	{http.MethodGet, "/apps/" + serverAppID + "/channels/presence-news/users", ``},
+}
+
+// serverCall makes one API call as the subject, straight into the handler.
+func serverCall(server http.Handler, subject auth.Subject, method, path, body string) *httptest.ResponseRecorder {
+	r := httptest.NewRequest(method, path, strings.NewReader(body))
+	if body != "" {
+		r.Header.Set("Content-Type", "application/json")
+	}
+	r = r.WithContext(auth.WithSubject(r.Context(), subject))
+	w := httptest.NewRecorder()
+	server.ServeHTTP(w, r)
+
+	return w
+}
+
+// An application that wrote a ConnectPolicy for its sockets, and nothing for
+// the API, must not have handed the API to every user who may connect: an
+// ordinary subject would publish forged events in the server's voice, close
+// other people's sockets and read the tenant's numbers.
+func TestServerRefusesTheAPIToAnOrdinarySubjectWhenNoOperationPolicyWasGiven(t *testing.T) {
+	broker := pusher.NewMemoryBroker()
+	server, err := joaju.NewServer(joaju.ServerConfig{
+		AppID: serverAppID, AppKey: serverAppKey, Broker: broker,
+		Connect: serverAnyUserConnectPolicy{}, Subscribe: serverPublicOnlyPolicy{},
+		Protocol: pusher.NewPusher(broker, serverPublicOnlyPolicy{}, pusher.PusherConfig{}),
+		Log:      slog.New(slog.DiscardHandler),
+	})
+	if err != nil {
+		t.Fatalf("NewServer() = %v", err)
+	}
+
+	user := auth.Subject{ID: "user-42", Tenant: tests.Tenant}
+	for _, call := range serverEveryRoute {
+		if w := serverCall(server, user, call.method, call.path, call.body); w.Code != http.StatusForbidden {
+			t.Errorf("%s %s answered %d %s, want %d: a server with no OperationPolicy let an ordinary subject operate it",
+				call.method, call.path, w.Code, strings.TrimSpace(w.Body.String()), http.StatusForbidden)
+		}
+	}
+
+	// The health check reads nothing and stays open.
+	if w := serverCall(server, user, http.MethodGet, "/up", ""); w.Code != http.StatusOK {
+		t.Errorf("GET /up answered %d, want %d", w.Code, http.StatusOK)
+	}
+}
+
+func TestServerRefusesTheAPIWhenTheOperationPolicyDoes(t *testing.T) {
+	f := newServerFixture(t, joaju.ServerConfig{
+		Connect: serverAnyUserConnectPolicy{},
+		Operate: &serverOperatePolicy{err: errors.New("only the backend operates this server")},
+	})
+
+	user := auth.Subject{ID: "user-42", Tenant: tests.Tenant}
+	for _, call := range serverEveryRoute {
+		if w := serverCall(f.server, user, call.method, call.path, call.body); w.Code != http.StatusForbidden {
+			t.Errorf("%s %s answered %d, want %d", call.method, call.path, w.Code, http.StatusForbidden)
+		}
+	}
+}
+
+func TestServerAsksTheOperationPolicyAboutTheRouteAndNeverTheConnectPolicy(t *testing.T) {
+	connect := &serverRecordingConnectPolicy{}
+	operate := &serverOperatePolicy{}
+	news := &serverChannel{name: tests.ChannelName(t, "news")}
+	members := &serverChannel{name: tests.ChannelName(t, "presence-news")}
+	f := newServerFixture(t, joaju.ServerConfig{Connect: connect, Operate: operate}, news, members)
+
+	user := auth.Subject{ID: "backend", Tenant: tests.Tenant}
+	for _, call := range serverEveryRoute {
+		r := httptest.NewRequest(call.method, call.path, strings.NewReader(call.body))
+		if call.body != "" {
+			r.Header.Set("Content-Type", "application/json")
+		}
+		r.Header.Set("Origin", "https://app.example.com")
+		r = r.WithContext(auth.WithSubject(r.Context(), user))
+		w := httptest.NewRecorder()
+		f.server.ServeHTTP(w, r)
+		if w.Code != http.StatusOK {
+			t.Errorf("%s %s answered %d %s, want %d", call.method, call.path, w.Code, strings.TrimSpace(w.Body.String()), http.StatusOK)
+		}
+	}
+
+	want := []string{
+		pusher.RouteEvents, pusher.RouteBatchEvents, pusher.RouteTerminateConnections,
+		pusher.RouteConnections, pusher.RouteChannels, pusher.RouteChannel, pusher.RouteChannelUsers,
+	}
+	asked := operate.seen()
+	if len(asked) != len(want) {
+		t.Fatalf("the OperationPolicy was asked %d times, want once per call: %v", len(asked), asked)
+	}
+	for i, op := range asked {
+		if op.Route != want[i] {
+			t.Errorf("call %d was asked about as %q, want %q", i, op.Route, want[i])
+		}
+		if op.Origin != "https://app.example.com" {
+			t.Errorf("call %d carried the origin %q, want the request's", i, op.Origin)
+		}
+	}
+	if n := connect.count(); n != 0 {
+		t.Fatalf("the ConnectPolicy was asked %d times by the API, want never: it answers for sockets", n)
+	}
+}
+
+func TestServerRegistryRefusesAGrantIssuedForASocket(t *testing.T) {
+	f := newServerFixture(t, joaju.ServerConfig{})
+
+	socket := auth.SystemGrant(joaju.Connect, tests.Tenant)
+	if _, err := f.server.Connections(socket); !errors.Is(err, auth.ErrForbidden) {
+		t.Errorf("Connections() with a Connect Grant = %v, want auth.ErrForbidden", err)
+	}
+	if _, err := f.server.Terminate(context.Background(), socket, "u1"); !errors.Is(err, auth.ErrForbidden) {
+		t.Errorf("Terminate() with a Connect Grant = %v, want auth.ErrForbidden", err)
+	}
+
+	operate := auth.SystemGrant(joaju.Operate, tests.Tenant)
+	if _, err := f.server.Connections(operate); err != nil {
+		t.Errorf("Connections() with an Operate Grant = %v, want nil", err)
 	}
 }

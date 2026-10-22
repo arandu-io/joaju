@@ -19,17 +19,25 @@
 //
 // # The authorization shape, which is the point
 //
-// Two decisions happen, and each one is a Policy that issues an auth.Grant:
+// Three decisions happen, and each one is a Policy that issues an auth.Grant:
 //
 //	[Connect]                    opening the socket    -> [ConnectPolicy]
 //	broadcasting.ChannelJoin     listening on one      -> [SubscriptionPolicy]
+//	[Operate]                    calling the HTTP API  -> [OperationPolicy]
 //
-// They are two decisions and not one because they answer different questions.
-// The first is whether this subject may hold a socket at all, and it is where
-// an origin allowlist belongs -- see [Handshake]. The second is whether this
-// subject may hear what goes out on one particular channel, and it is asked
-// again for every channel, because subscribing is a read and no read reaches a
-// channel without a policy behind it.
+// The first two are two decisions and not one because they answer different
+// questions. The first is whether this subject may hold a socket at all, and
+// it is where an origin allowlist belongs -- see [Handshake]. The second is
+// whether this subject may hear what goes out on one particular channel, and
+// it is asked again for every channel, because subscribing is a read and no
+// read reaches a channel without a policy behind it.
+//
+// The third is whether this subject may operate the server through its HTTP
+// API -- publish, count, list, terminate -- and it is not the first asked
+// again: everybody who may hold a socket is rarely somebody who may publish in
+// the server's voice. It is optional, and a server built without one refuses
+// every API call. A call that names a channel still asks the second, per
+// channel.
 //
 // A [Connection] cannot be built without a Grant, and a [ChannelName] cannot be
 // built without one either. The tenant is enforced by the type and not by a
@@ -135,7 +143,8 @@
 // Every one of the seven that reads or writes channel state needs a Grant, and
 // [Broker] is why: there is no method on it that reaches a channel without one.
 // [API] is the whole of what a route may reach, and there is nothing on it that
-// writes to the connection registry or reads one without a Grant.
+// writes to the connection registry or reads one without a Grant an
+// [OperationPolicy] issued.
 //
 // # The protocol
 //

@@ -14,10 +14,11 @@
 // # What it decides, and what it refuses to decide
 //
 // A [joaju.ServerConfig] needs a [joaju.ConnectPolicy] and a
-// [joaju.SubscriptionPolicy], and a policy is an application's own rule about
-// its own people. A generic process has no people. What it has is the app
-// secret, which in the Pusher protocol is the credential of the application
-// itself, so that is what it authenticates: the HTTP API is signed and
+// [joaju.SubscriptionPolicy], its HTTP API needs a [joaju.OperationPolicy], and
+// a policy is an application's own rule about its own people. A generic
+// process has no people. What it has is the app secret, which in the Pusher
+// protocol is the credential of the application itself, so that is what it
+// authenticates: the HTTP API is signed and
 // [frontDoor] verifies it, a browser is the anonymous reader hesape calls
 // auth.Guest, and the tenant of both is the process's configuration and never
 // the request's.
@@ -144,7 +145,7 @@ func run() error {
 
 // newServer assembles the server out of the configuration.
 //
-// The two policies are values with no state beyond the tenant, so they are built
+// The three policies are values with no state beyond the tenant, so they are built
 // here rather than injected: there is one application in this process and one
 // rule for it, and a seam to swap them for others would be a second way to
 // decide who may connect.
@@ -164,6 +165,7 @@ func newServer(cfg config, log *slog.Logger) (*joaju.Server, error) {
 			tenant:  cfg.Tenant,
 			origins: cfg.AllowedOrigins,
 		},
+		Operate:   operationPolicy{tenant: cfg.Tenant},
 		Subscribe: subscribe,
 		Protocol:  frameLayer(broker, subscribe, cfg),
 		Log:       log,

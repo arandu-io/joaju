@@ -157,6 +157,23 @@ func (journeyConnectPolicy) Can(_ context.Context, s auth.Subject, a auth.Action
 	return nil
 }
 
+// journeyOperatePolicy is who may call the HTTP API on this application:
+// anybody signed in, so that each customer's caller can publish and read its
+// own numbers. What it may then see is the tenant on the Grant's to narrow,
+// which is what this file proves.
+type journeyOperatePolicy struct{}
+
+func (journeyOperatePolicy) Can(_ context.Context, s auth.Subject, a auth.Action, _ joaju.Operation) error {
+	if a != joaju.Operate {
+		return fmt.Errorf("no rule allows %s on the API", a)
+	}
+	if s.IsGuest() {
+		return errors.New("sign in before calling the API")
+	}
+
+	return nil
+}
+
 // journeySubscribePolicy is who may hear what, and it is the only thing between
 // a socket and a channel.
 //
@@ -234,6 +251,7 @@ func newJourneyFixture(t *testing.T, allow func(auth.Subject, joaju.Subscription
 		AppKey:    journeyAppKey,
 		Broker:    broker,
 		Connect:   journeyConnectPolicy{},
+		Operate:   journeyOperatePolicy{},
 		Subscribe: policy,
 		Protocol:  pusher.NewPusher(broker, policy, pusher.PusherConfig{}),
 		// Several tests here refuse something on purpose, and the suite's output
