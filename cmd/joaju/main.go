@@ -84,7 +84,7 @@ func run() error {
 		maxBody = joaju.DefaultMaxBodySize
 	}
 
-	httpServer := newHTTPServer(frontDoor{
+	httpServer := newHTTPServer(newAddressLimit(cfg.MaxConnectionsPerAddress, cfg.TrustedProxies, log, frontDoor{
 		appKey:  cfg.AppKey,
 		secret:  []byte(cfg.AppSecret),
 		tenant:  cfg.Tenant,
@@ -92,7 +92,7 @@ func run() error {
 		now:     time.Now,
 		log:     log,
 		next:    server,
-	}, log)
+	}), log)
 
 	// The listener is opened before anything is announced, so the line below is
 	// true when it is written: a port already in use is an error and not a

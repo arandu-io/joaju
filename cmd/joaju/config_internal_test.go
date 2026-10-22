@@ -2,6 +2,7 @@ package main
 
 import (
 	"log/slog"
+	"net/netip"
 	"slices"
 	"strings"
 	"testing"
@@ -291,5 +292,64 @@ func TestLoadConfigMetersEverySocketUnlessToldNotTo(t *testing.T) {
 	}
 	if defaultMaxMessagesPerSecond <= 0 {
 		t.Fatalf("defaultMaxMessagesPerSecond = %d: an unset variable leaves every socket unmetered", defaultMaxMessagesPerSecond)
+	}
+}
+
+func TestLoadConfigLimitsSocketsPerAddressUnlessToldNotTo(t *testing.T) {
+	t.Parallel()
+
+	for value, want := range map[string]int{
+		"":   defaultMaxConnectionsPerAddress,
+		"0":  defaultMaxConnectionsPerAddress,
+		"-1": -1,
+		"8":  8,
+	} {
+		vars := identity()
+		if value != "" {
+			vars["JOAJU_MAX_CONNECTIONS_PER_ADDRESS"] = value
+		}
+
+		cfg, err := loadConfig(lookup(vars))
+		if err != nil {
+			t.Fatalf("loadConfig with %q: %v", value, err)
+		}
+		if cfg.MaxConnectionsPerAddress != want {
+			t.Errorf("JOAJU_MAX_CONNECTIONS_PER_ADDRESS=%q gave %d, want %d", value, cfg.MaxConnectionsPerAddress, want)
+		}
+	}
+}
+
+func TestLoadConfigReadsTheTrustedProxies(t *testing.T) {
+	t.Parallel()
+
+	read := func(value string) ([]netip.Prefix, error) {
+		vars := identity()
+		if value != "" {
+			vars["JOAJU_TRUSTED_PROXIES"] = value
+		}
+		cfg, err := loadConfig(lookup(vars))
+
+		return cfg.TrustedProxies, err
+	}
+
+	if got, err := read(""); err != nil || !slices.Equal(got, defaultTrustedProxies) {
+		t.Errorf("unset gave %v, %v; want the loopback and private ranges", got, err)
+	}
+	if got, err := read("none"); err != nil || got == nil || len(got) != 0 {
+		t.Errorf("none gave %v, %v; want an empty list that believes nobody", got, err)
+	}
+	got, err := read("10.1.2.3, 192.0.2.0/24 ,2001:db8::/32")
+	want := []netip.Prefix{
+		netip.MustParsePrefix("10.1.2.3/32"),
+		netip.MustParsePrefix("192.0.2.0/24"),
+		netip.MustParsePrefix("2001:db8::/32"),
+	}
+	if err != nil || !slices.Equal(got, want) {
+		t.Errorf("a list gave %v, %v; want %v", got, err, want)
+	}
+	for _, bad := range []string{"proxy.internal", "10.0.0.0/33", " , "} {
+		if _, err := read(bad); err == nil {
+			t.Errorf("JOAJU_TRUSTED_PROXIES=%q was accepted", bad)
+		}
 	}
 }

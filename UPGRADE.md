@@ -107,3 +107,32 @@ the rate-limit error and dropped; the socket stays. Set the variable to `0` for
 the old behaviour, or raise it together with
 `JOAJU_MAX_CHANNELS_PER_CONNECTION`. The library's `ServerConfig` is unchanged:
 zero there is still no limit.
+
+### `cmd/joaju` limits sockets per client address
+
+The standalone server now refuses a socket with **429** when its client
+address already holds `JOAJU_MAX_CONNECTIONS_PER_ADDRESS` sockets (256 by
+default; a negative number turns the limit off). The library's per-tenant
+limit was the only one, and with one tenant served to anonymous browsers one
+address could take all of it.
+
+The client address is the TCP peer, unless the peer is a trusted proxy, in
+which case the `X-Forwarded-For` it appended is read from the right.
+`JOAJU_TRUSTED_PROXIES` lists the trusted proxies as addresses or CIDR
+prefixes; unset means loopback and the private ranges (`127.0.0.0/8`,
+`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `::1`, `fc00::/7`), and
+`none` trusts nobody.
+
+Check this before upgrading a deployment behind a proxy:
+
+- A reverse proxy on a private network or loopback that sets
+  `X-Forwarded-For` (nginx, Traefik, Caddy by default): nothing to do.
+- A proxy or CDN on a public address (for example Cloudflare in front of the
+  process, or a load balancer with a public source address): list its ranges in
+  `JOAJU_TRUSTED_PROXIES`, or every visitor counts as that proxy and the whole
+  deployment gets 256 sockets.
+- A TCP passthrough that does not set `X-Forwarded-For`: every visitor counts as
+  the proxy; raise the limit or turn it off.
+
+A refusal is logged as `joaju: a socket was refused by the per-address limit`
+with the address and a hint naming `JOAJU_TRUSTED_PROXIES`.

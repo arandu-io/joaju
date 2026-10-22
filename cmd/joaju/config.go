@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"log/slog"
+	"net/netip"
 	"net/url"
 	"strconv"
 	"strings"
@@ -64,7 +65,35 @@ const (
 	// frames a second is. A deployment that raises the channel limit raises
 	// this with it.
 	defaultMaxMessagesPerSecond = pusher.DefaultMaxChannelsPerConnection
+	// defaultMaxConnectionsPerAddress is how many sockets one client address
+	// may hold when the deployment did not say.
+	//
+	// The library limits sockets per tenant, and this process serves one
+	// tenant to anonymous browsers, so without a second limit one address can
+	// take every socket the tenant has and leave nothing for anybody else. The
+	// number is high enough for an office behind one NAT with a tab open per
+	// person and low enough that taking the tenant's ten thousand needs dozens
+	// of addresses rather than one.
+	defaultMaxConnectionsPerAddress = 256
 )
+
+// defaultTrustedProxies are the peers believed about X-Forwarded-For when
+// JOAJU_TRUSTED_PROXIES is unset: loopback and the private ranges.
+//
+// A reverse proxy holds the certificate in front of this process, and it
+// almost always reaches it over loopback or a private network -- a sidecar, a
+// container bridge, a VPC. Believing nobody would make every browser look like
+// the proxy and the per-address limit a limit on the whole deployment. A peer
+// on the public internet is never believed, so a browser connecting directly
+// cannot name another address for itself.
+var defaultTrustedProxies = []netip.Prefix{
+	netip.MustParsePrefix("127.0.0.0/8"),
+	netip.MustParsePrefix("10.0.0.0/8"),
+	netip.MustParsePrefix("172.16.0.0/12"),
+	netip.MustParsePrefix("192.168.0.0/16"),
+	netip.MustParsePrefix("::1/128"),
+	netip.MustParsePrefix("fc00::/7"),
+}
 
 // config is what this process reads out of its environment, already parsed.
 //
@@ -132,6 +161,17 @@ type config struct {
 	// so it is passed to [pusher.PusherConfig] and not to the server. Zero is
 	// [pusher.DefaultMaxChannelsPerConnection] and a negative number is no limit.
 	MaxChannelsPerConnection int
+
+	// MaxConnectionsPerAddress is how many sockets one client address may hold
+	// open at once. Zero is [defaultMaxConnectionsPerAddress] and a negative
+	// number is no limit. See [addressLimit].
+	MaxConnectionsPerAddress int
+
+	// TrustedProxies are the peers whose X-Forwarded-For is believed when the
+	// client address is worked out for MaxConnectionsPerAddress. Unset is
+	// [defaultTrustedProxies]; "none" believes nobody, and the peer address is
+	// then always the client's.
+	TrustedProxies []netip.Prefix
 
 	// ShutdownTimeout is the deadline the signal handler works to. Zero means
 	// [defaultShutdownTimeout].
@@ -216,6 +256,15 @@ func loadConfig(env environment) (config, error) {
 	if cfg.MaxChannelsPerConnection, err = env.count("MAX_CHANNELS_PER_CONNECTION"); err != nil {
 		return config{}, err
 	}
+	if cfg.MaxConnectionsPerAddress, err = env.count("MAX_CONNECTIONS_PER_ADDRESS"); err != nil {
+		return config{}, err
+	}
+	if cfg.MaxConnectionsPerAddress == 0 {
+		cfg.MaxConnectionsPerAddress = defaultMaxConnectionsPerAddress
+	}
+	if cfg.TrustedProxies, err = env.proxies("TRUSTED_PROXIES"); err != nil {
+		return config{}, err
+	}
 	if cfg.WriteTimeout, err = env.duration("WRITE_TIMEOUT"); err != nil {
 		return config{}, err
 	}
@@ -274,6 +323,44 @@ func (env environment) origins(name string) ([]string, error) {
 	}
 	if len(kept) == 0 {
 		return nil, fmt.Errorf("joaju: %s%s contains no origin", envPrefix, name)
+	}
+
+	return kept, nil
+}
+
+// proxies reads a comma-separated list of peers believed about
+// X-Forwarded-For, each an address or a CIDR prefix. Unset is
+// [defaultTrustedProxies], and "none" is an empty list: nobody is believed.
+func (env environment) proxies(name string) ([]netip.Prefix, error) {
+	raw := env.text(name)
+	switch raw {
+	case "":
+		return defaultTrustedProxies, nil
+	case "none":
+		return []netip.Prefix{}, nil
+	}
+
+	var kept []netip.Prefix
+	for _, entry := range strings.Split(raw, ",") {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+
+		prefix, err := netip.ParsePrefix(entry)
+		if err != nil {
+			addr, addrErr := netip.ParseAddr(entry)
+			if addrErr != nil {
+				return nil, fmt.Errorf("joaju: %s%s contains %q, which is neither an address nor a CIDR prefix", envPrefix, name, entry)
+			}
+			addr = addr.Unmap()
+			prefix = netip.PrefixFrom(addr, addr.BitLen())
+		}
+
+		kept = append(kept, prefix.Masked())
+	}
+	if len(kept) == 0 {
+		return nil, fmt.Errorf("joaju: %s%s contains no address: write none to believe nobody", envPrefix, name)
 	}
 
 	return kept, nil
