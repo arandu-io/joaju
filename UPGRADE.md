@@ -136,3 +136,12 @@ Check this before upgrading a deployment behind a proxy:
 
 A refusal is logged as `joaju: a socket was refused by the per-address limit`
 with the address and a hint naming `JOAJU_TRUSTED_PROXIES`.
+
+### A cache channel does not cache client events
+
+A `client-` event relayed on a `cache-`, `private-cache-` or
+`presence-cache-` channel used to become the event the channel replays to the
+next subscriber, so any subscriber allowed to send client events could replace
+the state the server last published. Client events are still relayed, and are
+no longer cached; the replay is the last event the server published. An event
+named `client-...` published through the HTTP API is not cached either.

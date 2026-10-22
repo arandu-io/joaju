@@ -736,6 +736,41 @@ func TestCacheChannelDoesNotCacheProtocolEvents(t *testing.T) {
 	}
 }
 
+// A client event is one browser talking to the others, and it is not the state
+// the server caches. If it were cached, any subscriber with client events on
+// could replace what every later subscriber is shown as the channel's current
+// state -- a forged order total on private-cache-orders.17 -- and the server's
+// own last word would be gone.
+func TestCacheChannelDoesNotCacheClientEvents(t *testing.T) {
+	c := channelTestChannel(t, "acme", "private-cache-orders.17")
+	sender, _ := channelTestSubscribe(t, c, "acme", "u1", joaju.Member{})
+
+	if err := c.BroadcastToAll(context.Background(), joaju.Event{
+		Name:    "order.paid",
+		Channel: c.Name(),
+		Data:    json.RawMessage(`{"total":200}`),
+	}); err != nil {
+		t.Fatalf("broadcasting the server's event: %v", err)
+	}
+	if err := c.Broadcast(context.Background(), joaju.Event{
+		Name:    ClientEventPrefix + "order.paid",
+		Channel: c.Name(),
+		Data:    json.RawMessage(`{"total":1}`),
+		Socket:  sender.ID(),
+	}); err != nil {
+		t.Fatalf("broadcasting the client's event: %v", err)
+	}
+
+	_, lateSink := channelTestSubscribe(t, c, "acme", "u2", joaju.Member{})
+	got := lateSink.frames(t)
+	if len(got) != 1 {
+		t.Fatalf("the late subscriber received %v, expected the server's last event replayed", got)
+	}
+	if got[0].Event != "order.paid" || got[0].Data != `{"total":200}` {
+		t.Fatalf("the replay is %q %s, expected the server's order.paid: a client event replaced the cached state", got[0].Event, got[0].Data)
+	}
+}
+
 func TestNonPresenceChannelDiscardsMemberData(t *testing.T) {
 	c := channelTestChannel(t, "acme", "private-orders.17")
 	conn, _ := channelTestSubscribe(t, c, "acme", "u1", joaju.Member{UserID: "u1", Info: json.RawMessage(`{"name":"Ana"}`)})

@@ -355,8 +355,10 @@ func (c *channel) send(ctx context.Context, e joaju.Event, skip joaju.SocketID) 
 	// A cache channel replays the last event so that a client arriving late
 	// sees the current state. The protocol's own traffic is not state:
 	// replaying [joaju.EventMemberAdded] would tell a new subscriber that somebody
-	// joined at a moment before they were listening.
-	if c.name.Type().Cache() && !f.IsProtocol() && !f.IsInternal() {
+	// joined at a moment before they were listening. Nor is a client event: it
+	// is one subscriber talking to the others, and caching it would let any of
+	// them replace what every later subscriber is shown as the server's state.
+	if c.name.Type().Cache() && !f.IsProtocol() && !f.IsInternal() && !f.IsClientEvent() {
 		c.cached, c.cachedSet = e, true
 	}
 	recipients := c.gather(skip)
