@@ -53,6 +53,17 @@ const (
 	// defaultIdleTimeout is how long a keep-alive connection may sit between
 	// requests before it is closed.
 	defaultIdleTimeout = 120 * time.Second
+	// defaultMaxMessagesPerSecond is how many frames one socket may send in a
+	// second when the deployment did not say.
+	//
+	// A browser sends a frame per channel it subscribes to, all at once when it
+	// reconnects, then a ping now and then. The limit is a token bucket whose
+	// burst is the limit itself, so this is set at
+	// [pusher.DefaultMaxChannelsPerConnection]: a client resubscribing to every
+	// channel it may hold is never refused, and a client sending a thousand
+	// frames a second is. A deployment that raises the channel limit raises
+	// this with it.
+	defaultMaxMessagesPerSecond = pusher.DefaultMaxChannelsPerConnection
 )
 
 // config is what this process reads out of its environment, already parsed.
@@ -101,14 +112,21 @@ type config struct {
 	// The socket's limits, passed through untouched. Zero is the Default of the
 	// same name in [joaju.ServerConfig], except MaxConnections, where a negative
 	// number means no limit.
-	MaxMessageSize       int64
-	MaxBodySize          int64
-	OutboundQueue        int
-	MaxConnections       int
+	MaxMessageSize int64
+	MaxBodySize    int64
+	OutboundQueue  int
+	MaxConnections int
+	WriteTimeout   time.Duration
+	PingInterval   time.Duration
+	PongTimeout    time.Duration
+
+	// MaxMessagesPerSecond is how many frames one socket may send in a second.
+	// Unset is [defaultMaxMessagesPerSecond], and 0 written out is no limit.
+	//
+	// It is the one socket limit this binary fills in, because the library has
+	// no default for it -- zero there is off -- and a process every browser on
+	// the internet may open sockets on cannot leave a socket unmetered.
 	MaxMessagesPerSecond int
-	WriteTimeout         time.Duration
-	PingInterval         time.Duration
-	PongTimeout          time.Duration
 
 	// MaxChannelsPerConnection is the protocol's limit rather than the socket's,
 	// so it is passed to [pusher.PusherConfig] and not to the server. Zero is
@@ -192,7 +210,7 @@ func loadConfig(env environment) (config, error) {
 	if cfg.MaxConnections, err = env.count("MAX_CONNECTIONS"); err != nil {
 		return config{}, err
 	}
-	if cfg.MaxMessagesPerSecond, err = env.nonNegativeCount("MAX_MESSAGES_PER_SECOND"); err != nil {
+	if cfg.MaxMessagesPerSecond, err = env.nonNegativeCountOr("MAX_MESSAGES_PER_SECOND", defaultMaxMessagesPerSecond); err != nil {
 		return config{}, err
 	}
 	if cfg.MaxChannelsPerConnection, err = env.count("MAX_CHANNELS_PER_CONNECTION"); err != nil {
@@ -291,6 +309,17 @@ func (env environment) nonNegativeCount(name string) (int, error) {
 	}
 
 	return value, nil
+}
+
+// nonNegativeCountOr is nonNegativeCount for a field whose zero is a real
+// setting -- off -- rather than a default. Unset is fallback; anything written,
+// zero included, is taken as written.
+func (env environment) nonNegativeCountOr(name string, fallback int) (int, error) {
+	if env.text(name) == "" {
+		return fallback, nil
+	}
+
+	return env.nonNegativeCount(name)
 }
 
 // size is count for a field measured in bytes, and refuses a negative one: a

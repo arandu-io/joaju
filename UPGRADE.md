@@ -96,3 +96,14 @@ longer than 30 seconds to be read, is cut; an idle keep-alive connection is
 closed after two minutes. Sockets are not affected: the server replaces both
 deadlines on the hijacked connection before it reads or writes a frame, and
 they keep `JOAJU_PONG_TIMEOUT` and `JOAJU_WRITE_TIMEOUT`.
+
+### `cmd/joaju` meters every socket by default
+
+`JOAJU_MAX_MESSAGES_PER_SECOND` left unset used to mean no limit. It now means
+100 frames per second per socket (a token bucket whose burst is the limit, the
+same number as the default channel limit, so a client resubscribing to every
+channel it may hold is never refused). A frame past the limit is answered with
+the rate-limit error and dropped; the socket stays. Set the variable to `0` for
+the old behaviour, or raise it together with
+`JOAJU_MAX_CHANNELS_PER_CONNECTION`. The library's `ServerConfig` is unchanged:
+zero there is still no limit.

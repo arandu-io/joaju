@@ -79,10 +79,17 @@ func TestLoadConfigLeavesTheLibrarysDefaultsToTheLibrary(t *testing.T) {
 	// of the same name", so a number filled in here would be a second place to
 	// read the default from -- and the one the reader does not look at.
 	if cfg.MaxMessageSize != 0 || cfg.MaxBodySize != 0 || cfg.OutboundQueue != 0 ||
-		cfg.MaxConnections != 0 || cfg.MaxMessagesPerSecond != 0 ||
+		cfg.MaxConnections != 0 ||
 		cfg.MaxChannelsPerConnection != 0 ||
 		cfg.WriteTimeout != 0 || cfg.PingInterval != 0 || cfg.PongTimeout != 0 {
 		t.Fatalf("a limit was filled in here instead of by joaju.NewServer: %+v", cfg)
+	}
+
+	// The one exception, because the library has no default for it to fill in:
+	// zero is off there, and an unmetered socket is not a default this process
+	// may have.
+	if cfg.MaxMessagesPerSecond != defaultMaxMessagesPerSecond {
+		t.Errorf("MaxMessagesPerSecond = %d, want %d", cfg.MaxMessagesPerSecond, defaultMaxMessagesPerSecond)
 	}
 
 	if cfg.Addr != defaultAddr {
@@ -258,5 +265,31 @@ func TestLoadConfigRefusesNegativeOperationalCounts(t *testing.T) {
 				t.Fatalf("error = %v, and it does not name %s", err, name)
 			}
 		})
+	}
+}
+
+func TestLoadConfigMetersEverySocketUnlessToldNotTo(t *testing.T) {
+	t.Parallel()
+
+	for value, want := range map[string]int{
+		"":   defaultMaxMessagesPerSecond,
+		"0":  0,
+		"30": 30,
+	} {
+		vars := identity()
+		if value != "" {
+			vars["JOAJU_MAX_MESSAGES_PER_SECOND"] = value
+		}
+
+		cfg, err := loadConfig(lookup(vars))
+		if err != nil {
+			t.Fatalf("loadConfig with %q: %v", value, err)
+		}
+		if cfg.MaxMessagesPerSecond != want {
+			t.Errorf("JOAJU_MAX_MESSAGES_PER_SECOND=%q gave %d, want %d", value, cfg.MaxMessagesPerSecond, want)
+		}
+	}
+	if defaultMaxMessagesPerSecond <= 0 {
+		t.Fatalf("defaultMaxMessagesPerSecond = %d: an unset variable leaves every socket unmetered", defaultMaxMessagesPerSecond)
 	}
 }
