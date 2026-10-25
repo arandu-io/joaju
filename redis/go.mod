@@ -1,6 +1,6 @@
 module github.com/arandu-io/joaju/redis
 
-go 1.26.0
+go 1.26.10
 
 // The bus, and its own module because of what is under it.
 //
@@ -44,11 +44,11 @@ go 1.26.0
 // in it.
 require (
 	github.com/arandu-io/hesape/redis v0.11.0
-	github.com/arandu-io/joaju v0.8.0
+	github.com/arandu-io/joaju v0.9.0
 )
 
 require (
-	github.com/arandu-io/hesape v0.84.1 // indirect
+	github.com/arandu-io/hesape v0.85.0 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/redis/go-redis/v9 v9.22.0 // indirect
 	go.uber.org/atomic v1.11.0 // indirect
