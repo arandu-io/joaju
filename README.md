@@ -32,7 +32,7 @@ container image runs.
 The root `go.mod` requires one module, `github.com/arandu-io/hesape`, and a CI
 step fails the build on anything outside `arandu-io` and `golang.org/x`.
 Subpackage `ws` is the RFC 6455 transport, in the tree rather than in the graph:
-the surface the server uses is nineteen names, and taking a library for them
+the surface the server uses is twenty-one names, and taking a library for them
 would bring a client stack, a buffer pool and permessage-deflate along with it.
 
 The conformance number is not quoted here today, and the reason is worth stating
@@ -45,10 +45,11 @@ the server does not negotiate.
 
 **No path to a channel that a policy did not open.** The server authenticates
 nobody: it reads the subject the framework's middleware put on the request and
-asks a Policy about it. Two decisions, each issuing a Grant — one for holding a
+asks a Policy about it. Three decisions, each issuing a Grant — one for holding a
 socket at all, one for reaching a channel, asked again for every channel and on
-every route that touches one. Subscribing is a read, and there is no exception
-for reads. A connection cannot be built without a Grant, a channel name cannot
+every route that touches one, and one for operating the server through the HTTP
+API (`Operate`, decided by an `OperationPolicy`; with none, every API route is
+refused). Subscribing is a read, and there is no exception for reads. A connection cannot be built without a Grant, a channel name cannot
 either, and the tenant is read off the Grant rather than off the wire.
 
 **The browser half is here too.** Subpackage `client` is the JavaScript that
@@ -65,8 +66,6 @@ add up what answers in time; a bus it cannot reach degrades to this process
 rather than failing a request. The bus is RESP pub/sub, in the `redis/`
 submodule — its own `go.mod`, because the driver under it is third-party and Go
 has no optional dependency.
-
-9,931 lines of production code and 11,486 of test.
 
 ## Install
 

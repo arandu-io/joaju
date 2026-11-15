@@ -118,10 +118,10 @@ go build ./... && go vet ./... && go test -race ./...
 
 The kind is read off the name's prefix, never stored, because the client chooses
 it by what it asks for. `ChannelName.Type` is the only place the prefixes are
-compared. The constants are `joaju.go:192-207`:
+compared. The constants are `joaju.go:201-221`:
 
 ```sh
-sed -n '187,208p' joaju.go   # PublicChannel .. PresenceCacheChannel: six
+sed -n '196,222p' joaju.go   # PublicChannel .. PresenceCacheChannel: six
 ```
 
 | kind | prefix | `Guarded()` | `Cache()` | `Presence()` |

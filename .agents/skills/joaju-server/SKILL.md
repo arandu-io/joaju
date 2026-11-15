@@ -27,8 +27,8 @@ POST /apps/{appId}/users/{userId}/terminate_connections  disconnect
 GET  /up                                                 health
 ```
 
-The socket route is registered in `server.go:501`; the other eight are one
-`mux.HandleFunc` each in `protocols/pusher/routes.go:83-90`. Count them there
+The socket route is registered in `server.go:545`; the other eight are one
+`mux.HandleFunc` each in `protocols/pusher/routes.go:105-112`. Count them there
 rather than believing this list:
 
 ```sh
@@ -74,7 +74,7 @@ is pinging a socket already hung up on. Half the read deadline is the number
 
 **3. Mount it behind the middleware that puts a subject on the context.** That
 middleware is the only thing in the ecosystem that calls `auth.WithSubject`, and
-`server.go:635` is where the server reads what it left:
+`server.go:716` is where the server reads what it left:
 
 ```go
 authenticate := middleware.NewAuthenticate(factory, subjectFor)

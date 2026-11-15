@@ -37,15 +37,15 @@ Empty output is the pass. Anything printed is a module in the graph that should
 not be there.
 
 The trade being protected is small and measurable. What the rest of the
-repository reaches for out of `ws` is twelve names of the package and seven
+repository reaches for out of `ws` is fourteen names of the package and seven
 methods of `Conn`:
 
 ```sh
 grep -rhoE '\bws\.[A-Za-z_][A-Za-z0-9_]*' server.go tests/Feature/*.go \
-  tests/Specification/echo/main.go | sort -u | wc -l      # 12
+  tests/Specification/echo/main.go | sort -u | wc -l      # 14
 ```
 
-`server.go` alone uses nine of those twelve, plus `Close`, `ReadMessage`,
+`server.go` alone uses eleven of those fourteen, plus `Close`, `ReadMessage`,
 `SetPongHandler`, `SetReadDeadline`, `SetReadLimit`, `SetWriteDeadline` and
 `WriteMessage`. A library for that surface brings a client stack, a proxy
 dialer, a buffer pool and permessage-deflate along with it — and a stream of
@@ -181,11 +181,9 @@ keeps a shutdown from racing a broadcast into a frame the peer must reject.
 
 Adding an exported symbol to `ws` is fine; the counts above are measurements,
 not budgets. What is not fine is leaving a written count behind that no longer
-matches. Three places state this number today — the comment above the `require`
+matches. Three places state this number — the comment above the `require`
 line in `go.mod`, the "# The transport" section of `doc.go`, and the README —
-and they do not agree. `go.mod` says nineteen and decomposes it as twelve of the
-package plus seven methods of `Conn`; the README says nineteen; `doc.go` says
-ten. The measurement above says twelve plus seven, so `doc.go` is the one that
-is wrong. Re-run the `grep` before trusting any of them, and fix all three
-together when the surface moves. A number that describes code nobody measured is
+and each decomposes it as names of the package plus seven methods of `Conn`.
+The measurement above gives fourteen plus seven. Re-run the `grep` before
+trusting any of them, and fix all three together when the surface moves. A number that describes code nobody measured is
 worse than no number.
