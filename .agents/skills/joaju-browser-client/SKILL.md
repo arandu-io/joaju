@@ -9,7 +9,7 @@ license: MIT
 A protocol only exists if something on the other end speaks it, and nothing in a
 browser speaks this one. The usual browser half arrives through npm, which this
 project does not have anywhere. So `client/joaju.js` is written here and served
-by the binary, the way HTMX and Alpine already arrive. There is no
+by the binary, the way YPY already arrives. There is no
 `package.json`, no lockfile, no bundler and no build step: the file that is
 embedded is the file a browser runs.
 

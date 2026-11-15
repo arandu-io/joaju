@@ -3,7 +3,7 @@
 // A protocol only exists if something on the other end speaks it, and nothing in
 // a browser speaks this one. The ready-made browser halves of it arrive through
 // npm -- which this project does not have, anywhere (RULE 13). So this file is
-// written here and served by the binary, the way HTMX and Alpine already are
+// written here and served by the binary, the way YPY already is
 // (ADR 0052).
 //
 // What is deliberately NOT here is the wrapper layer that usually sits on top of
@@ -16,7 +16,7 @@
 // No build step, no bundler, no transpiler. Classes, template-free strings and
 // promises are all ES2017, which every browser this project targets has had for
 // years. The file is a classic script that assigns one global, because that is
-// how HTMX and Alpine already arrive on the page and a module would mean the
+// how YPY already arrives on the page and a module would mean the
 // application writing modules of its own.
 //
 // # It runs under script-src 'self'

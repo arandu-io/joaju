@@ -5,7 +5,7 @@
 // The protocol only exists if something on the other end speaks it, and nothing
 // in a browser speaks this one. The usual browser half of it arrives through
 // npm, which this project does not have anywhere. So joaju.js is written here
-// and served by the binary, the same way HTMX and Alpine already arrive. There
+// and served by the binary, the same way YPY already arrives. There
 // is no package.json, no lockfile, no bundler and no build step: the file that
 // is embedded is the file a browser runs.
 //
