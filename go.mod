@@ -4,7 +4,7 @@ go 1.26.10
 
 // ws/ is this project's own WebSocket implementation of RFC 6455, and it is the
 // reason the dependency list is as short as it is: the surface the server uses
-// is nineteen names -- twelve of the package and seven methods of Conn -- and
+// is twenty-one names -- fourteen of the package and seven methods of Conn -- and
 // taking a library for them would bring a client stack, a buffer pool and
 // permessage-deflate along with it.
 //
@@ -16,4 +16,4 @@ go 1.26.10
 // to a channel is a read and RULE 17 has no exception, and redis for the
 // pub/sub that lets two instances agree on who is connected where.
 
-require github.com/arandu-io/hesape v0.85.0
+require github.com/arandu-io/hesape v0.107.0
